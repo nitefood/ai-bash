@@ -252,7 +252,7 @@ MarkdownEcho() {
 
 UpdateConversationTopic() {
   # $1 = full conversation history
-  temp_conversation_history=$(jq -c ". += [{\"role\": \"user\", \"content\": \"give me a 4-5 words title for this conversation\"}]" <<<"$conversation_history")
+  temp_conversation_history=$(jq -c ". += [{\"role\": \"user\", \"content\": \"give me a 4-5 words title for this conversation. Don't list possible titles, come up with ONLY ONE and give it back. No other output must be given, beside the title itself.\"}]" <<<"$conversation_history")
   CONVERSATION_TOPIC=$(SendChat "$temp_conversation_history" | jq -r '.content' | tr -d '\n')
   # sometimes the AI replies with conversation names enclosed in double quotes, other times it has double quotes inside the topic description. Handle it
   if [ "${CONVERSATION_TOPIC::1}" = '"' ] && [ "${CONVERSATION_TOPIC: -1}" = '"' ]; then
