@@ -117,7 +117,7 @@ SendChat() {
       ai_output=$(jq -r '.choices[0].text' <<<"$response_json")
       ai_output=$(jq -c --arg ai_output "$ai_output" '{"role": "assistant", "content": $ai_output}')
     else
-      # modello di chat
+      # chat model
       response_json=$(
         curl -s "$model_endpoint" \
           -H "Content-Type: application/json" \
