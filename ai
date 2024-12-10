@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 
 # ╭──────────────────────────────────────────────────────────────────────────────────────╮
-# │    AI - a commandline ChatGPT client in BASH with conversation/completion support    │
+# │      AI - a commandline AI client in BASH with conversation/completion support      │
 # │                                                                                      │
-# │Project homepage:                                                                     │
+# │ Project homepage:                                                                    │
 # │                                                                                      │
-# │ https://github.com/nitefood/ai-bash-gpt                                              │
+# │ https://github.com/nitefood/ai-bash                                             │
 # │                                                                                      │
-# │Usage:                                                                                │
+# │ Usage:                                                                               │
 # │                                                                                      │
 # │ (Launch the script with the -h parameter or visit the project's homepage)            │
 # ╰──────────────────────────────────────────────────────────────────────────────────────╯
 
 # TODO: customizable system prompting (to "prime" the assistant)
-# TODO: temperature setting and presets (mimick Bing's "Creative", "Balanced", "Precise")
-
-AI_VERSION="0.3"
+# TODO: temperature setting and presets
+AI_VERSION="1.0-beta"
+SCRIPT_NAME=$(basename "$0")
 
 # Color scheme
 green=$'\e[38;5;035m'
@@ -37,45 +37,38 @@ IFS=$'\n'
 
 SAVE_CONVERSATION=true # Should we save conversations?
 SAVE_CONVERSATION_MIN_SIZE=2 # What should be the minimum conversation size to save?
-WORKING_DIR="${HOME}"
-APIKEY_FILENAME=".openai.key" # Stored conversations file
+WORKING_DIR="${HOME}/.config/ai-bash"
+CONFIG_FILENAME="config.json" # Configuration file
 CONVERSATIONS_FILENAME="conversations.json" # Stored conversations file
 TMP_CONVERSATIONS_FILENAME=".${CONVERSATIONS_FILENAME}.tmp" # swap conversation filename
 CONVERSATION_TOPIC="\"new conversation\"" # Default name for a new conversation
-CONVERSATION_BUFFER_LEN=30 # Conversation buffer length (number of messages ChatGPT will try to remember)
+CONVERSATION_BUFFER_LEN=30 # Conversation buffer length (number of messages the AI will try to remember)
 RETRY_WAIT_TIME=3 # Retry wait time in case of server error
 IMAGE_GENERATION_MODE=false
 IMAGES_TO_GENERATE=1
-
-APIKEY_FILENAME="${WORKING_DIR}/${APIKEY_FILENAME}"
+CONFIG_FILENAME="${WORKING_DIR}/${CONFIG_FILENAME}"
 CONVERSATIONS_FILENAME="${WORKING_DIR}/${CONVERSATIONS_FILENAME}"
 TMP_CONVERSATIONS_FILENAME="${WORKING_DIR}/${TMP_CONVERSATIONS_FILENAME}"
-
-OPENAI_CHAT_API_ENDPOINT="https://api.openai.com/v1/chat/completions"
-OPENAI_IMAGE_API_ENDPOINT="https://api.openai.com/v1/images/generations"
-OPENAI_GPT_MODEL="gpt-3.5-turbo"
-CHATGPT_VERSION="3.5"
-
-API_KEY=""
+CURRENT_MODEL=""
 
 StatusbarMessage() { # invoke without parameters to delete the status bar message
-	if [ -n "$statusbar_message" ]; then
-		# delete previous status bar message
-		blank_line=$(printf "%.0s " $(seq "$terminal_width"))
-		printf "\r%s\r" "$blank_line" >&2
-	fi
-	if [ -n "$1" ]; then
-		statusbar_message="$1"
+  if [ -n "$statusbar_message" ]; then
+    # delete previous status bar message
+    blank_line=$(printf "%.0s " $(seq "$terminal_width"))
+    printf "\r%s\r" "$blank_line" >&2
+  fi
+  if [ -n "$1" ]; then
+    statusbar_message="$1"
     msg_chars=$(echo -e "$1")
-		max_msg_size=$((terminal_width-5))
-		if [ "${#msg_chars}" -gt "${max_msg_size}" ]; then
-			statusbar_message="${lightgreybg}${statusbar_message:0:$max_msg_size}${lightgreybg}..."
-		else
-			statusbar_message="${lightgreybg}${statusbar_message}"
-		fi
-		statusbar_message+="${lightgreybg} (press CTRL-C to cancel)...${default}"
-		echo -en "$statusbar_message" >&2
-	fi
+    max_msg_size=$((terminal_width - 5))
+    if [ "${#msg_chars}" -gt "${max_msg_size}" ]; then
+      statusbar_message="${lightgreybg}${statusbar_message:0:$max_msg_size}${lightgreybg}..."
+    else
+      statusbar_message="${lightgreybg}${statusbar_message}"
+    fi
+    statusbar_message+="${lightgreybg} (press CTRL-C to cancel)...${default}"
+    echo -en "$statusbar_message" >&2
+  fi
 }
 
 ChatBubble() {
@@ -88,7 +81,7 @@ ChatBubble() {
   local bubblecolor="$1"; shift
   # shellcheck disable=SC2124
   texttoshow="$@"
-  
+
   [[ -n "${texttoshow}" ]] && texttoshow=" ${texttoshow}"
   output="╞ ${bgcolor} ${speaker} ${default}${bubblecolor}${texttoshow} ╡"
   output_len=$(( ${#speaker} + ${#texttoshow} + 2 ))
@@ -106,15 +99,35 @@ SendChat() {
   # Param ("$@"): the full conversation buffer in JSON format
   # trim input to only contain the most recent CONVERSATION_BUFFER_LEN elements
   input=$(jq ".[-$CONVERSATION_BUFFER_LEN:]" <<<"$@")
+  local model_endpoint api_key
+  model_endpoint=$(jq -r '.models.'"$CURRENT_MODEL"'.endpoint' "$CONFIG_FILENAME")
+  api_key=$(jq -r '.models.'"$CURRENT_MODEL"'.api_key' "$CONFIG_FILENAME")
   while true; do
     msg_buf_size=$(wc -c <<<"$input" | numfmt --to=iec)
-    StatusbarMessage "Request sent (size: ${bluebg}$msg_buf_size${lightgreybg} bytes) Waiting for ChatGPT to reply"
-    response_json=$(curl -s $OPENAI_CHAT_API_ENDPOINT \
-      -H "Content-Type: application/json" \
-      -H "Authorization: Bearer $API_KEY" \
-      -d '{ "model": "'$OPENAI_GPT_MODEL'", "messages": '"$input"' }')
-    gpt_output=$(jq -c '.choices[0].message' <<<"$response_json")
-    if [ "$gpt_output" = "null" ]; then
+    StatusbarMessage "Request sent (size: ${bluebg}$msg_buf_size${lightgreybg} bytes) Waiting for AI to reply"
+    if [[ "$model_endpoint" == *"completions" ]]; then
+      # completion model
+      prompt=$(jq -r '.[-1].content' <<<"$input")
+      response_json=$(
+        curl -s "$model_endpoint" \
+          -H "Content-Type: application/json" \
+          -H "Authorization: Bearer $api_key" \
+          -d '{ "model": "'"$CURRENT_MODEL"'", "prompt": "'"$prompt"'", "max_tokens": 1000 }'
+      )
+      ai_output=$(jq -r '.choices[0].text' <<<"$response_json")
+      ai_output=$(jq -c --arg ai_output "$ai_output" '{"role": "assistant", "content": $ai_output}')
+    else
+      # modello di chat
+      response_json=$(
+        curl -s "$model_endpoint" \
+          -H "Content-Type: application/json" \
+          -H "Authorization: Bearer $api_key" \
+          -d '{ "model": "'"$CURRENT_MODEL"'", "messages": '"$input"' }'
+      )
+      ai_output=$(jq -c '.choices[0].message' <<<"$response_json")
+    fi
+
+    if [ "$ai_output" = "null" ]; then
       StatusbarMessage
       error_type=$(jq -r '.error.type' <<<"$response_json")
       error_code=$(jq -r '.error.code' <<<"$response_json")
@@ -125,29 +138,34 @@ SendChat() {
       echo -e "${redbg} MESG ${default} $error_msg" >&2
       retryafter="$RETRY_WAIT_TIME"
       while [[ ${retryafter} -gt 0 ]]; do
-        StatusbarMessage "ChatGPT error. Retrying in ${redbg}${retryafter}${lightgreybg} seconds"
+        StatusbarMessage "AI error. Retrying in ${redbg}${retryafter}${lightgreybg} seconds"
         sleep 1
         (( retryafter-- ))
       done
-    else 
+    else
       break
     fi
   done
   StatusbarMessage
-  echo "$gpt_output"
+  echo "$ai_output"
 }
 
 GenerateImage() {
+  local model_endpoint api_key
+  model_endpoint=$(jq -r '.models.'"$CURRENT_MODEL"'.endpoint' "$CONFIG_FILENAME")
+  api_key=$(jq -r '.models.'"$CURRENT_MODEL"'.api_key' "$CONFIG_FILENAME")
   while true; do
     msg_buf_size=$(wc -c <<<"$input" | numfmt --to=iec)
     [[ "$IMAGES_TO_GENERATE" -gt 1 ]] && plural="s" || plural=""
     StatusbarMessage "Generating ${bluebg}$IMAGES_TO_GENERATE${lightgreybg} 1024x1024 image${plural}"
-    response_json=$(curl -s $OPENAI_IMAGE_API_ENDPOINT \
-      -H "Content-Type: application/json" \
-      -H "Authorization: Bearer $API_KEY" \
-      -d '{"prompt": "'"$userinput"'", "n": '"$IMAGES_TO_GENERATE"', "size": "1024x1024"}')
-    gpt_output=$(jq -r 'select (.data != null) | .data[].url' <<<"$response_json")
-    if [ -z "$gpt_output" ]; then
+    response_json=$(
+      curl -s "$model_endpoint" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $api_key" \
+        -d '{"prompt": "'"$userinput"'", "n": '"$IMAGES_TO_GENERATE"', "size": "1024x1024"}'
+    )
+    ai_output=$(jq -r 'select (.data != null) | .data[].url' <<<"$response_json")
+    if [ -z "$ai_output" ]; then
       StatusbarMessage
       error_type=$(jq -r '.error.type' <<<"$response_json")
       error_code=$(jq -r '.error.code' <<<"$response_json")
@@ -158,11 +176,11 @@ GenerateImage() {
       echo -e "${redbg} MESG ${default} $error_msg" >&2
       retryafter="$RETRY_WAIT_TIME"
       while [[ ${retryafter} -gt 0 ]]; do
-        StatusbarMessage "ChatGPT error. Retrying in ${redbg}${retryafter}${lightgreybg} seconds"
+        StatusbarMessage "AI error. Retrying in ${redbg}${retryafter}${lightgreybg} seconds"
         sleep 1
         (( retryafter-- ))
       done
-    else 
+    else
       createdate=$(jq -r '.created' <<<"$response_json")
       break
     fi
@@ -173,7 +191,7 @@ GenerateImage() {
   imgcounter=1
   arr_imgfiles=()
   arr_imgurls=()
-  for imageurl in $gpt_output; do
+  for imageurl in $ai_output; do
     StatusbarMessage "Parsing image n.$imgcounter"
     imgfile="${tmpfile}_${imgcounter}"
     arr_imgfiles+=("$imgfile")
@@ -188,7 +206,7 @@ GenerateImage() {
       convert "$imgfile" -font DejaVu-Sans -pointsize 250 -fill magenta -gravity south -annotate +0+5 "$i" miff:-
       (( i++ ))
     done ) | montage - -background '#000000' -geometry +0+0 "$tmpfile.png"
-  
+
   echo -e "\n${default}\"${bold}${underline}${userinput}${default}\"\n"
   catimg -w "$term_cols" "$tmpfile.png"
   i=1
@@ -196,7 +214,7 @@ GenerateImage() {
     echo -e "${blue}[$i]${default} - $imgurl"
     (( i++ ))
   done
-  
+
   savedir=$(date +"%Y_%m_%d-%H_%M_%S" -d @"$createdate")
   savedir="${WORKING_DIR}/${savedir}_imgs"
   echo ""
@@ -215,7 +233,7 @@ GenerateImage() {
     # and the prompt
     echo "$userinput" > "$savedir/prompt.txt"
   else
-    echo -e "\nNote: the image links will be valid for ${blue}2 hours${default}, after which OpenAI will delete them!\n"
+    echo -e "\nNote: the image links will be valid for ${blue}2 hours${default}, after which the provider will delete them!\n"
   fi
   # delete any leftover temporary files
   rm "${tmpfile}"*
@@ -235,12 +253,8 @@ MarkdownEcho() {
 UpdateConversationTopic() {
   # $1 = full conversation history
   temp_conversation_history=$(jq -c ". += [{\"role\": \"user\", \"content\": \"give me a 4-5 words title for this conversation\"}]" <<<"$conversation_history")
-  # temporarily switch to gpt-3.5-turbo model to save credits when summarizing the conversation
-  SavedGPTModel="$OPENAI_GPT_MODEL"
-  OPENAI_GPT_MODEL="gpt-3.5-turbo"
   CONVERSATION_TOPIC=$(SendChat "$temp_conversation_history" | jq -r '.content' | tr -d '\n')
-  OPENAI_GPT_MODEL="$SavedGPTModel"
-  # sometimes ChatGPT replies with conversation names enclosed in double quotes, other times it has double quotes inside the topic description. Handle it
+  # sometimes the AI replies with conversation names enclosed in double quotes, other times it has double quotes inside the topic description. Handle it
   if [ "${CONVERSATION_TOPIC::1}" = '"' ] && [ "${CONVERSATION_TOPIC: -1}" = '"' ]; then
     CONVERSATION_TOPIC=$(sed -e 's/^"//g' -e 's/"$//g' <<<"$CONVERSATION_TOPIC")
   fi
@@ -255,7 +269,7 @@ SaveConversation() {
   fi
   if [ -w "$CONVERSATIONS_FILENAME" ]; then
     # conversations file is writeable
-    json_conversation=$(jq '{"conversation_name": '"$CONVERSATION_TOPIC"', "conversation": .}' <<<"$conversation_history")
+    json_conversation=$(jq --arg model "$CURRENT_MODEL" '{"model": $model, "conversation_name": '"$CONVERSATION_TOPIC"', "conversation": .}' <<<"$conversation_history")
     jq --argjson conversation "$json_conversation" '. += [$conversation]' "${CONVERSATIONS_FILENAME}" > "${TMP_CONVERSATIONS_FILENAME}" && \
       mv "${TMP_CONVERSATIONS_FILENAME}" "${CONVERSATIONS_FILENAME}"
   fi
@@ -267,19 +281,19 @@ ReplayConversationMessages() {
     speaker=$(jq -r '.role' <<<"$row")
     rowcontent=$(jq -r '.content' <<<"$row")
     case "${speaker}" in
-      "user")
-        speaker="YOU"
-        color="$green"
-        colorbg="$greenbg"
-        ;;
-      "assistant")
-        speaker="ChatGPT"
-        color="$white"
-        colorbg="$lightgreybg"
-        ;;
+    "user")
+      speaker="YOU"
+      color="$green"
+      colorbg="$greenbg"
+      ;;
+    "assistant")
+      speaker="$CURRENT_MODEL"
+      color="$white"
+      colorbg="$lightgreybg"
+      ;;
     esac
     ChatBubble "$speaker" "$colorbg" "$color"
-    if [ "$speaker" = "ChatGPT" ]; then
+    if [ "$speaker" = "$CURRENT_MODEL" ]; then
       # preserve markdown formatting in bot replies
       MarkdownEcho "$rowcontent"
     else
@@ -301,7 +315,7 @@ Ctrl_C() {
   exit 0
 }
 
-ParseConversationsFile(){
+ParseConversationsFile() {
   # check if conversation storing is enabled
   if [ "$SAVE_CONVERSATION" = true ]; then
     # load conversations file
@@ -344,8 +358,9 @@ SwitchConversation() {
   conversation_history=$(jq '.conversation' <<<"$conversation_json")
   # update the conversation messages number
   conversation_messages=$(jq 'length' <<<"$conversation_history")
-  # and switch the topic
+  # and switch the topic and model
   CONVERSATION_TOPIC=$(jq '.conversation_name' <<<"$conversation_json")
+  CURRENT_MODEL=$(jq -r '.model' <<<"$conversation_json")
   # delete the old conversation from the conversations file.
   # an updated version of this conversation will be saved at the end of this session
   jq 'del (.['"$1"'])' "${CONVERSATIONS_FILENAME}" > "${TMP_CONVERSATIONS_FILENAME}" && \
@@ -363,13 +378,14 @@ ShowConversationsMenu() {
       echo -en "\n  ${yellow}No previous/other conversations found!"
     else
       title_list=$(jq '.[].conversation_name' "$CONVERSATIONS_FILENAME")
+      model_list=$(jq '.[].model' "$CONVERSATIONS_FILENAME")
       i=1
-      for title in $title_list; do
-        printf "\n%3d) %s" "$i" "$title"
+      while read -r title && read -r model <&3; do
+        printf "\n%3d) %s - %s" "$i" "$title" "$model"
         (( i++ ))
-      done
+      done < <(paste <(echo "$title_list") <(echo "$model_list") 3<&0)
     fi
-    #echo -e "\n\n  ${bold}0) START A NEW CONVERSATION${default}${yellow}"
+    echo -e "\n\n  ${bold}0) START A NEW CONVERSATION${default}${yellow}"
     echo -e "\n\n${dim}Choose a conversation to continue, or\n${default}${yellow}[   0   ]${default}${yellow}${dim} to start a new conversation\n${default}${yellow}[ ENTER ]${default}${yellow}${dim} to return to the current one\n"
     while true; do
       read -erp "${default}${yellow}» " convmenuinput
@@ -412,24 +428,200 @@ ShowConversationsMenu() {
   fi
 }
 
-GetAPIKey() {
-  # load APIKEY file
-  if [ -z "$API_KEY" ]; then
-    if [ ! -f "$APIKEY_FILENAME" ]; then
-      # APIKEY file does not exist, prompt the user for a password and store it (unless we're running through a pipe)
-      if [ "$PIPED_SCRIPT" = true ]; then
-        echo -e "\nError: please set your API key first by running the script without parameters"
-        exit 1
+ManageModels() {
+  case "$1" in
+  "list"|"l")
+    echo -e "\n${yellowbg}Available models:${default}\n"
+    config_content=$(jq -r '.models' "$CONFIG_FILENAME")
+    printf "%-20s %-50s %-30s\n" "Model Name" "Endpoint" "API Key"
+    printf "%-20s %-50s %-30s\n" "----------" "--------" "-------"
+    for model_name in $(jq -r 'keys[]' <<<"$config_content"); do
+      endpoint=$(jq -r --arg model_name "$model_name" '.[$model_name].endpoint' <<<"$config_content")
+      api_key=$(jq -r --arg model_name "$model_name" '.[$model_name].api_key' <<<"$config_content")
+      is_default=$(jq -r --arg model_name "$model_name" '.[$model_name].default' <<<"$config_content")
+      default_label=""
+      if [ "$is_default" = true ]; then
+        default_label=" ${greenbg} DEFAULT ${default}"
+      fi
+      printf "%-20s %-50s %-30s%s\n" "$model_name" "$endpoint" "${api_key:0:5}***" "$default_label"
+    done
+    ;;
+  "add"|"a")
+    # debug: print all params
+    echo "Model name: $2, endpoint: $3, api_key: $4, default: $5"
+    if [ -z "$2" ] || [ -z "$3" ] || [ -z "$4" ]; then
+      if [ "$#" -lt 2 ]; then
+        AddNewModel false
       else
-        echo ""
-        read -rsp "${blue}Please enter your OpenAI API key: ${default}" API_KEY
-        echo "$API_KEY" > "$APIKEY_FILENAME"
-        chmod 600 "$APIKEY_FILENAME"
-        echo -e "${bluebg} SUCCESS ${default}${blue} Key saved to file \"$APIKEY_FILENAME\""
+        echo -e "\n${redbg} ERROR ${default} Missing parameters for adding a model.\n"
+        echo -e "Usage: ${blue}$SCRIPT_NAME -m add <model_name> <endpoint> <api_key> [default]${default}"
+        echo -e "(or just ${blue}$SCRIPT_NAME -m add${default} to add interactively)"
+        return 1
       fi
     else
-      API_KEY=$(cat "$APIKEY_FILENAME")
+      local model_name="$2"
+      local endpoint="$3"
+      local api_key="$4"
+      local default_value=false
+      if [ "$5" == "default" ]; then
+        default_value=true
+      fi
+      jq --arg model_name "$model_name" \
+        --arg endpoint "$endpoint" \
+        --arg api_key "$api_key" \
+        --argjson default "$default_value" \
+        '.models += {($model_name): {endpoint: $endpoint, api_key: $api_key, default: $default}}' "$CONFIG_FILENAME" >temp.json && mv temp.json "$CONFIG_FILENAME"
+      echo -e "\n${greenbg} SUCCESS ${default} Model ${green}$model_name${default} added successfully.\n"
+      if [ "$default_value" = true ]; then
+        ManageModels "setdefault" "$model_name"
+      fi
     fi
+    ;;
+  "delete"|"del")
+    if [ -z "$2" ]; then
+      echo -e "\n${redbg} ERROR ${default} Missing model name for deletion.\n"
+      echo -e "Usage: ${blue}$SCRIPT_NAME -m delete <model_name>${default}"
+      return 1
+    fi
+    local model_name="$2"
+    local model_count
+    model_count=$(jq '.models | length' "$CONFIG_FILENAME")
+    if [ "$model_count" -le 1 ]; then
+      echo -e "\n${redbg} ERROR ${default} Cannot delete the only available model.\n"
+      return 1
+    fi
+    if ! jq -e --arg model_name "$model_name" '.models[$model_name]' "$CONFIG_FILENAME" >/dev/null; then
+      echo -e "\n${redbg} ERROR ${default} Model ${red}$model_name${default} not found.\n"
+      return 1
+    fi
+    is_default=$(jq -r --arg model_name "$model_name" '.models[$model_name].default' "$CONFIG_FILENAME")
+    jq --arg model_name "$model_name" 'del(.models[$model_name])' "$CONFIG_FILENAME" >temp.json && mv temp.json "$CONFIG_FILENAME"
+    if [ "$is_default" = "true" ]; then
+      first_model=$(jq -r '.models | keys[0]' "$CONFIG_FILENAME")
+      jq --arg first_model "$first_model" '.models[$first_model].default = true' "$CONFIG_FILENAME" >temp.json && mv temp.json "$CONFIG_FILENAME"
+      echo -e "\n${yellowbg} WARNING ${default} Default model deleted. ${yellow}$first_model${default} set as new default.\n"
+    fi
+    echo -e "\n${greenbg} SUCCESS ${default} Model ${green}$model_name${default} deleted successfully.\n"
+    ;;
+  "setdefault"|"default")
+    if [ -z "$2" ]; then
+      echo -e "\n${redbg} ERROR ${default} Missing model name for setting as default.\n"
+      echo -e "Usage: ${blue}$SCRIPT_NAME -m setdefault <model_name>${default}"
+      return 1
+    fi
+    local model_name="$2"
+    if ! jq -e --arg model_name "$model_name" '.models[$model_name]' "$CONFIG_FILENAME" >/dev/null; then
+      echo -e "\n${redbg} ERROR ${default} Model ${red}$model_name${default} not found.\n"
+      return 1
+    fi
+    # First, set all models to default: false
+    config_content=$(jq '.models |= map_values(.default = false)' "$CONFIG_FILENAME")
+    # Then, set the specified model to default: true
+    config_content=$(jq --arg model_name "$model_name" '.models[$model_name].default = true' <<<"$config_content")
+    echo "$config_content" > "$CONFIG_FILENAME"
+    echo -e "\n${greenbg} SUCCESS ${default} Model ${green}$model_name${default} set as default.\n"
+    ;;
+  *)
+    echo -e "\n${redbg} ERROR ${default} Invalid action for model management.\n"
+    echo -e "Available actions: ${blue}list, add, delete, setdefault${default}"
+    return 1
+    ;;
+  esac
+}
+
+AddNewModel() {
+  # $1 = force default model (true/false)
+  local forcedefault="$1"
+  echo -e "\n${blue}Select the model to add:${default}"
+  echo -e "1) OpenAI/GPT4o-mini"
+  echo -e "2) OpenAI/GPT4o"
+  echo -e "3) Custom model"
+  echo
+  read -rp "Enter your choice (1-3): " model_choice
+
+  case "$model_choice" in
+    1)
+      model_name="gpt-4o-mini"
+      endpoint="https://api.openai.com/v1/chat/completions"
+      ;;
+    2)
+      model_name="gpt-4o"
+      endpoint="https://api.openai.com/v1/chat/completions"
+      ;;
+    3)
+      read -rp "Enter model name: " model_name
+      read -rp "Enter API endpoint (base url): " endpoint
+      ;;
+    *)
+      echo -e "${red}Invalid choice. Exiting.${default}"
+      return 1
+      ;;
+  esac
+
+  read -rp "Enter API Key (press ENTER to skip): " api_key
+  [[ -z "$api_key" ]] && api_key="XXX"
+  if [ "$forcedefault" = true ]; then
+    default_value=true
+  else
+    read -rp "Set as default model [y/N]: " set_default
+    [[ "$set_default" =~ ^[Yy]$ ]] && default_value=true || default_value=false
+  fi
+  jq --arg model_name "$model_name" \
+    --arg endpoint "$endpoint" \
+    --arg api_key "$api_key" \
+    --argjson default "$default_value" \
+    '.models += {($model_name): {endpoint: $endpoint, api_key: $api_key, default: $default}}' "$CONFIG_FILENAME" >temp.json && mv temp.json "$CONFIG_FILENAME"
+
+  echo -e "\n${greenbg} SUCCESS ${default} Model ${green}$model_name${default} added successfully.\n"
+  if [ "$default_value" = true ]; then
+    ManageModels "setdefault" "$model_name"
+  fi
+}
+
+InitializeConfig() {
+  # Create config directory if it doesn't exist
+  mkdir -p "$WORKING_DIR"
+  # Check if config file exists
+  if [ ! -f "$CONFIG_FILENAME" ]; then
+    # Create a new config file, with an empty models block
+    echo -e "{}" > "$CONFIG_FILENAME"
+    echo -e "${bluebg} INFO ${default} Configuration file created at ${blue}\"$CONFIG_FILENAME\"${default}"
+    # open the configuration wizard
+    echo -e "\n${yellowbg} Configuration file not found ${default}"
+    echo -e "${yellow}Please add at least one model to continue.${default}"
+    AddNewModel true # add a new model, and set it as default
+  fi
+  # Check if the config file is valid JSON
+  if ! jq empty "$CONFIG_FILENAME" >/dev/null 2>&1; then
+    echo -e "${redbg} ERROR ${default} Invalid JSON in configuration file: ${red}\"$CONFIG_FILENAME\", recreating it${default}"
+    echo -e "{}" > "$CONFIG_FILENAME"
+    AddNewModel true # add a new model, and set it as default
+  fi
+  # Check if 'models' key exists in the config file
+  if ! jq -e '.models' "$CONFIG_FILENAME" >/dev/null 2>&1; then
+    # echo -e "${redbg} ERROR ${default} Missing 'models' key in configuration file: ${red}\"$CONFIG_FILENAME\"${default}"
+    # the config file is corrupted, delete it and recreate it
+    echo -e "{}" > "$CONFIG_FILENAME"
+    AddNewModel true # add a new model, and set it as default
+  fi
+}
+
+SetCurrentModel() {
+  if [ -n "$1" ]; then
+    # Model specified via command line
+    if jq -e --arg model "$1" '.models[$model] == null' "$CONFIG_FILENAME"; then
+      echo -e "${redbg} ERROR ${default} Model ${red}\"$1\"${default} not found in configuration."
+      exit 1
+    fi
+    CURRENT_MODEL="$1"
+  else
+    # Determine default model
+    default_model=$(jq -r '.models | to_entries[] | select(.value.default == true) | .key' "$CONFIG_FILENAME")
+    if [ -z "$default_model" ]; then
+      echo -e "${redbg} ERROR ${default} No default model set in configuration."
+      exit 1
+    fi
+    CURRENT_MODEL="$default_model"
   fi
 }
 
@@ -447,7 +639,7 @@ DELETE_CONVERSATION=false
 CONTINUE_CONVERSATION=false
 CONVERSATION_ID_TO_CONTINUE=""
 tmpfile=""
-
+InitializeConfig
 if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
   # script was called with a command line parameter, or was invoked through a pipe
   if [ "$#" -ge 1 ]; then
@@ -456,14 +648,12 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
     # optspec contains:
     # - options followed by a colon: parameter is mandatory
     # - first colon: disable getopts' own error reporting
-    # 	in this mode, getopts sets optchar to:
-    # 	'?' -> unknown option
-    # 	':' -> missing mandatory parameter to the option
-    optspec=":h4cd:li"
-
-    while getopts "$optspec" optchar; do { 
-
-      GetFullParamsFromCurrentPosition(){
+    # in this mode, getopts sets optchar to:
+    # '?' -> unknown option
+    # ':' -> missing mandatory parameter to the option
+    optspec=":hcd:lim:"
+    while getopts "$optspec" optchar; do {
+      GetFullParamsFromCurrentPosition() {
         #
         # Helper function that retrieves all the command line
         # parameters starting from position $OPTIND (current
@@ -486,122 +676,124 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
       }
 
       case "${optchar}" in
-        "h")
-          # display usage help
-          echo -e "\n${bold}ai-bash-gpt v${AI_VERSION} Usage:${default}\n"
-          echo -e "${bold}Note: the ${blue}-4${default}${bold} optional parameter switches to GPT-4 model. Currently you need a paid OpenAI plan for this.\n"
-          echo -e "${dim}Show this help:${default}\n  ${blue}ai -h${default}"
-          echo -e "${dim}Start a new interactive conversation:${default}\n  ${blue}ai [-4]${default}"
-          echo -e "${dim}One shot Q&A:${default}\n  ${blue}ai [-4] \"how many planets are there in the solar system?\"${default}"
-          echo -e "${dim}Generate one or more images (default: 1):${default}\n  ${blue}ai -i [num] \"a cute cat\"${default}"
-          echo -e "${dim}Submit data as part of the question:${default}\n  ${blue}cat file.txt | ai [-4] can you summarize the contents of this file?${default}"
-          echo -e "${dim}List saved conversations:${default}\n  ${blue}ai -l${default}"
-          echo -e "${dim}Continue last conversation:${default}\n  ${blue}ai [-4] -c${default}"
-          echo -e "${dim}Continue specific conversation:${default}\n  ${blue}ai [-4] -c <conversation_id>${default}"
-          echo -e "${dim}Delete a conversation:${default}\n  ${blue}ai -d <conversation_id>${default}"
-          echo -e "${dim}Delete multiple conversations:${default}\n  ${blue}ai -d <conversation_id_start>-<conversation_id_end>${default}"
-          echo -e "${dim}Delete all conversations:${default}\n  ${blue}rm \"${CONVERSATIONS_FILENAME}\"${default}"
-          exit 0
-          ;;
-        "4")
-          OPENAI_GPT_MODEL="gpt-4"
-          CHATGPT_VERSION="4"
-          ;;
-        "c")
-          # user wants to continue a conversation
-          INTERACTIVE_CONVERSATION=true
-          CONTINUE_CONVERSATION=true
-          GetFullParamsFromCurrentPosition "$@"
-          CONVERSATION_ID_TO_CONTINUE=${userinput//[^0-9]/} # remove all non-digits (e.g. the user passed "-c3" instead of "-c 3")
-          break
-          ;;
-        "d")
-          # user wants to delete a previous conversation
-          GetFullParamsFromCurrentPosition "$@"
-          DELETE_CONVERSATION=true
-          CONVERSATION_ID_TO_DELETE_UPTO=""
-          ParseConversationsFile
-          CONVERSATION_ID_TO_DELETE=${userinput//[^0-9\-]/} # remove all non-digits (excluding dash) (e.g. the user passed "-d3" instead of "-d 3")
-          if [ -z "${CONVERSATION_ID_TO_DELETE##*-*}" ]; then
-            # user wants to delete a range of conversations
-            CONVERSATION_ID_TO_DELETE_UPTO=$(cut -d '-' -f 2 <<<"$CONVERSATION_ID_TO_DELETE")
-            CONVERSATION_ID_TO_DELETE=$(cut -d '-' -f 1 <<<"$CONVERSATION_ID_TO_DELETE")
-            if (( CONVERSATION_ID_TO_DELETE_UPTO < CONVERSATION_ID_TO_DELETE )); then
-                echo -e "\nError: wrong conversation range, cannot delete it!"
-                exit 1
-            fi
-          else
-            CONVERSATION_ID_TO_DELETE_UPTO="$CONVERSATION_ID_TO_DELETE"
-          fi
-          if  (( CONVERSATION_ID_TO_DELETE > num_previous_conversations )) || \
-              (( CONVERSATION_ID_TO_DELETE_UPTO > num_previous_conversations )) || \
-              (( CONVERSATION_ID_TO_DELETE == 0 )) || \
-              (( CONVERSATION_ID_TO_DELETE_UPTO == 0 )); then
-            echo -e "\nError: conversation not found (or wrong conversation range), cannot delete it!"
+      "h")
+        # display usage help
+        echo -e "\n${bold}ai-bash v${AI_VERSION} Usage:${default}\n"
+        echo -e "${dim}Show this help:${default}\n  ${blue}ai -h${default}"
+        echo -e "${dim}Start a new interactive conversation:${default}\n  ${blue}ai${default}"
+        echo -e "${dim}One shot Q&A:${default}\n  ${blue}ai \"how many planets are there in the solar system?\"${default}"
+        echo -e "${dim}Generate one or more images (default: 1):${default}\n  ${blue}ai -i [num] \"a cute cat\"${default}"
+        echo -e "${dim}Submit data as part of the question:${default}\n  ${blue}cat file.txt | ai can you summarize the contents of this file?${default}"
+        echo -e "${dim}List saved conversations:${default}\n  ${blue}ai -l${default}"
+        echo -e "${dim}Continue last conversation:${default}\n  ${blue}ai -c${default}"
+        echo -e "${dim}Continue specific conversation:${default}\n  ${blue}ai -c <conversation_id>${default}"
+        echo -e "${dim}Delete a conversation:${default}\n  ${blue}ai -d <conversation_id>${default}"
+        echo -e "${dim}Delete multiple conversations:${default}\n  ${blue}ai -d <conversation_id_start>-<conversation_id_end>${default}"
+        echo -e "${dim}Delete all conversations:${default}\n  ${blue}rm \"${CONVERSATIONS_FILENAME}\"${default}"
+        echo -e "${dim}Manage models:${default}\n  ${blue}ai -m list${default}\n  ${blue}ai -m add <model_name> <endpoint> <api_key> [default]${default}\n  ${blue}ai -m delete <model_name>${default}\n  ${blue}ai -m setdefault <model_name>${default}"
+        exit 0
+        ;;
+      "c")
+        # user wants to continue a conversation
+        INTERACTIVE_CONVERSATION=true
+        CONTINUE_CONVERSATION=true
+        GetFullParamsFromCurrentPosition "$@"
+        CONVERSATION_ID_TO_CONTINUE=${userinput//[^0-9]/} # remove all non-digits (e.g. the user passed "-c3" instead of "-c 3")
+        break
+        ;;
+      "d")
+        # user wants to delete a previous conversation
+        GetFullParamsFromCurrentPosition "$@"
+        DELETE_CONVERSATION=true
+        CONVERSATION_ID_TO_DELETE_UPTO=""
+        ParseConversationsFile
+        CONVERSATION_ID_TO_DELETE=${userinput//[^0-9\-]/} # remove all non-digits (excluding dash) (e.g. the user passed "-d3" instead of "-d 3")
+        if [ -z "${CONVERSATION_ID_TO_DELETE##*-*}" ]; then
+          # user wants to delete a range of conversations
+          CONVERSATION_ID_TO_DELETE_UPTO=$(cut -d '-' -f 2 <<<"$CONVERSATION_ID_TO_DELETE")
+          CONVERSATION_ID_TO_DELETE=$(cut -d '-' -f 1 <<<"$CONVERSATION_ID_TO_DELETE")
+          if (( CONVERSATION_ID_TO_DELETE_UPTO < CONVERSATION_ID_TO_DELETE )); then
+            echo -e "\nError: wrong conversation range, cannot delete it!"
             exit 1
           fi
-          if [ "$CONVERSATION_ID_TO_DELETE_UPTO" != "$CONVERSATION_ID_TO_DELETE" ]; then
-            delete_prompt="${yellow}Delete conversations from ${bold}$CONVERSATION_ID_TO_DELETE${default}${yellow} to ${bold}$CONVERSATION_ID_TO_DELETE_UPTO${default}${yellow}? [y/N]"
-          else
-            delete_prompt="${yellow}Delete conversation ${bold}$CONVERSATION_ID_TO_DELETE${default}${yellow}? [y/N]"
-          fi
-          read -erp "$delete_prompt" wannadelete
-          if [ "$wannadelete" = "Y" ] || [ "$wannadelete" = "y" ]; then
-            (( CONVERSATION_ID_TO_DELETE-- ))
-            (( CONVERSATION_ID_TO_DELETE_UPTO-- ))
-            for ((convid=CONVERSATION_ID_TO_DELETE_UPTO; convid >= CONVERSATION_ID_TO_DELETE; convid--)); do
-              convname=$(jq '.['"${convid}"'].conversation_name' "$CONVERSATIONS_FILENAME")
-              jq 'del (.['"$convid"'])' "${CONVERSATIONS_FILENAME}" > "${TMP_CONVERSATIONS_FILENAME}" && \
-                mv "${TMP_CONVERSATIONS_FILENAME}" "${CONVERSATIONS_FILENAME}"
-              echo -e "\n${default}Conversation ${yellow}$convname${default} deleted"
-            done
-          fi
-          exit 0
-          ;;
-        "l")
-          # user wants to list previous conversations
-          ParseConversationsFile
-          echo -en "\n${yellowbg} Previous conversations ${default}${yellow}"
-          if [ "$num_previous_conversations" = "0" ]; then
-            echo -e "\n\nNo previous conversation found.${default}"
-            exit 0
-          fi
-          title_list=$(jq '.[].conversation_name' "$CONVERSATIONS_FILENAME")
-          i=1
-          for title in $title_list; do
-            printf "\n%3d) %s" "$i" "$title"
-            (( i++ ))
+        else
+          CONVERSATION_ID_TO_DELETE_UPTO="$CONVERSATION_ID_TO_DELETE"
+        fi
+        if (( CONVERSATION_ID_TO_DELETE > num_previous_conversations )) || \
+          (( CONVERSATION_ID_TO_DELETE_UPTO > num_previous_conversations )) || \
+          (( CONVERSATION_ID_TO_DELETE == 0 )) || \
+          (( CONVERSATION_ID_TO_DELETE_UPTO == 0 )); then
+          echo -e "\nError: conversation not found (or wrong conversation range), cannot delete it!"
+          exit 1
+        fi
+        if [ "$CONVERSATION_ID_TO_DELETE_UPTO" != "$CONVERSATION_ID_TO_DELETE" ]; then
+          delete_prompt="${yellow}Delete conversations from ${bold}$CONVERSATION_ID_TO_DELETE${default}${yellow} to ${bold}$CONVERSATION_ID_TO_DELETE_UPTO${default}${yellow}? [y/N]"
+        else
+          delete_prompt="${yellow}Delete conversation ${bold}$CONVERSATION_ID_TO_DELETE${default}${yellow}? [y/N]"
+        fi
+        read -erp "$delete_prompt" wannadelete
+        if [ "$wannadelete" = "Y" ] || [ "$wannadelete" = "y" ]; then
+          (( CONVERSATION_ID_TO_DELETE-- ))
+          (( CONVERSATION_ID_TO_DELETE_UPTO-- ))
+          for (( convid = CONVERSATION_ID_TO_DELETE_UPTO; convid >= CONVERSATION_ID_TO_DELETE; convid-- )); do
+            convname=$(jq '.['"${convid}"'].conversation_name' "$CONVERSATIONS_FILENAME")
+            jq 'del (.['"$convid"'])' "${CONVERSATIONS_FILENAME}" > "${TMP_CONVERSATIONS_FILENAME}" && \
+              mv "${TMP_CONVERSATIONS_FILENAME}" "${CONVERSATIONS_FILENAME}"
+            echo -e "\n${default}Conversation ${yellow}$convname${default} deleted"
           done
-          echo -e "\n\n${default}Use ${blue}${bold}ai -c${default} to continue last conversation, ${blue}${bold}ai -c <id>${default} to continue a specific one, or ${blue}${bold}ai -d <id>${default} to delete it"
-          exit
-          ;;
-        "i")
-          # user wants to generate 1 or more images
-          IMAGE_GENERATION_MODE=true
-          GetFullParamsFromCurrentPosition "$@"
-          # check if the user specified a number of images
-          regexp_number_and_space="^ (10|[1-9]) (.*)"
-          if [[ $userinput =~ $regexp_number_and_space ]]; then
-            IMAGES_TO_GENERATE="${BASH_REMATCH[1]}"
-            userinput="${BASH_REMATCH[2]}"
-          fi
-          break
-          ;;
-        *)
-          if [ "$OPTERR" = 1 ] && [ -t 0 ]; then
-            [[ "$optchar" = "?" ]] && echo -e "Error: unknown option '-$OPTARG'"
-            [[ "$optchar" = ":" ]] && echo -e "Error: option '-$OPTARG' requires an argument"
-            exit 1
-          fi
-          ;;
+        fi
+        exit 0
+        ;;
+      "l")
+        # user wants to list previous conversations
+        ParseConversationsFile
+        echo -en "\n${yellowbg} Previous conversations ${default}${yellow}"
+        if [ "$num_previous_conversations" = "0" ]; then
+          echo -e "\n\nNo previous conversation found.${default}"
+          exit 0
+        fi
+        title_list=$(jq '.[].conversation_name' "$CONVERSATIONS_FILENAME")
+        model_list=$(jq '.[].model' "$CONVERSATIONS_FILENAME")
+        i=1
+        while read -r title && read -r model <&3; do
+          printf "\n%3d) %s - %s" "$i" "$title" "$model"
+          (( i++ ))
+        done < <(paste <(echo "$title_list") <(echo "$model_list") 3<&0)
+        echo -e "\n\n${default}Use ${blue}${bold}ai -c${default} to continue last conversation, ${blue}${bold}ai -c <id>${default} to continue a specific one, or ${blue}${bold}ai -d <id>${default} to delete it"
+        exit
+        ;;
+      "i")
+        # user wants to generate 1 or more images
+        IMAGE_GENERATION_MODE=true
+        GetFullParamsFromCurrentPosition "$@"
+        # check if the user specified a number of images
+        regexp_number_and_space="^ (10|[1-9]) (.*)"
+        if [[ $userinput =~ $regexp_number_and_space ]]; then
+          IMAGES_TO_GENERATE="${BASH_REMATCH[1]}"
+          userinput="${BASH_REMATCH[2]}"
+        fi
+        break
+        ;;
+      "m")
+        shift
+        ManageModels "$@"
+        exit 0
+        ;;
+      *)
+        if [ "$OPTERR" = 1 ] && [ -t 0 ]; then
+          [[ "$optchar" = "?" ]] && echo -e "Error: unknown option '-$OPTARG'"
+          [[ "$optchar" = ":" ]] && echo -e "Error: option '-$OPTARG' requires an argument"
+          exit 1
+        fi
+        ;;
       esac
     }
     done
     userinput=$(awk '{ sub(/^[ \t]+/, ""); print }' <<<"$userinput")
   fi
-  
+
   ParseConversationsFile
-  
+
   if [ "$CONTINUE_CONVERSATION" = true ]; then
     if [ "$num_previous_conversations" = "0" ]; then
       echo "Error: No previous conversations found, cannot continue!"
@@ -616,7 +808,7 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
         echo "Error: invalid conversation id"
         exit 1
       fi
-      conversation_id="$(( CONVERSATION_ID_TO_CONTINUE-1 ))"
+      conversation_id="$(( CONVERSATION_ID_TO_CONTINUE - 1 ))"
     fi
     if [ ! -t 0 ]; then
       # we have input from stdin (script was invoked through a pipe)
@@ -626,12 +818,11 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
     SwitchConversation "$conversation_id"
   elif [ "$IMAGE_GENERATION_MODE" = false ]; then
     # we're not in image generation mode
-
-    # GPT version is not 3.5, shift the passed input
-    # this is necessary for when the user only passes "-4" as an option, as shifting
+    # Model option was passed, shift the passed input
+    # this is necessary for when the user only passes "-m" as an option, as shifting
     # is not performed during option parsing
-    [[ "$CHATGPT_VERSION" != "3.5" ]] && shift
-
+    [[ "$1" == "-m" ]] && shift 2
+    SetCurrentModel "$1"
     if [ ! -t 0 ]; then
       # we have input from stdin (script was invoked through a pipe)
       PIPED_SCRIPT=true
@@ -649,19 +840,17 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
       userinput=$(echo -en "$@")
       [[ -n "$userinput" ]] && userinput=$(echo -en "$userinput" | jq -Rs '.')
     fi
-    # echo "Model: v$CHATGPT_VERSION, input='$userinput'"; exit # DBG
+
     if [ -z "$userinput" ]; then
-      # no userinput was passed, we're here only because user passed the -4 option and nothing else
+      # no userinput was passed, we're here only because user passed the -m option and nothing else
       # prepare the REPL and keep going
       INTERACTIVE_CONVERSATION=true
       conversation_messages=0
     else
-      GetAPIKey
-      userinput=$( echo -n "[{\"role\": \"user\", \"content\": $userinput}]")
-      # echo "$userinput"; exit # DBG
+      userinput=$(echo -n "[{\"role\": \"user\", \"content\": $userinput}]")
       response_message=$(SendChat "$userinput")
       response_text=$(jq -r '.content' <<<"$response_message")
-      echo -e "\n${lightgreybg} ChatGPT ${default} replied:"
+      echo -e "\n${lightgreybg} AI ${default} replied:"
       MarkdownEcho "$response_text"
       if [ "$PIPED_SCRIPT" = true ]; then
         conversation_history=$(jq -c ". += $userinput" <<<"$conversation_history")
@@ -701,11 +890,10 @@ else
   # script was called without parameters, setup a new conversation
   INTERACTIVE_CONVERSATION=true
   conversation_messages=0
+  SetCurrentModel
 fi
 
 stty -echoctl && trap Ctrl_C INT
-GetAPIKey
-
 if [ "$IMAGE_GENERATION_MODE" = true ]; then
   GenerateImage
   exit 0
@@ -721,7 +909,7 @@ echo -en "\n${green}Enter an empty line to send your query, or ${greenbg} ? ${de
 while true; do
   userinput=""
   SHOW_CONVMENU=false
-  ChatBubble "YOU" "${greenbg}" "${green}" "(conversation topic: ${CONVERSATION_TOPIC})"
+  ChatBubble "YOU" "${greenbg}" "${green}" "(conversation topic: ${CONVERSATION_TOPIC}, model: ${CURRENT_MODEL})"
   while true; do
     read -erp "» " inputline
     if [ "$inputline" = "?" ]; then
@@ -730,7 +918,7 @@ while true; do
     fi
     if [ -z "$inputline" ]; then
       # user sent an empty line
-      if [ -n "$userinput" ]; then 
+      if [ -n "$userinput" ]; then
         # the user entered previous text, proceed
         break
       else
@@ -749,7 +937,7 @@ while true; do
     # escape user input to create a JSON string, safe to pass on
     userinput=$(jq -Rs '.' <<<"$userinput")
     conversation_history=$(jq -c ". += [{\"role\": \"user\", \"content\": $userinput}]" <<<"$conversation_history")
-    (( conversation_messages+=2 ))
+    (( conversation_messages += 2 ))
     response_message=$(SendChat "$conversation_history")
     conversation_history=$(jq -c ". += [$response_message]" <<<"$conversation_history")
     # update the topic after the first interaction, and afterwards every 2 interactions with the AI
@@ -759,7 +947,7 @@ while true; do
       UpdateConversationTopic
     fi
     response_text=$(jq -r '.content' <<<"$response_message")
-    ChatBubble "ChatGPT-${CHATGPT_VERSION}" "${lightgreybg}" "${white}"
+    ChatBubble "$CURRENT_MODEL" "${lightgreybg}" "${white}"
     MarkdownEcho "$response_text"
   fi
 done
