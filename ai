@@ -477,7 +477,7 @@ ManageModels() {
       fi
     fi
     ;;
-  "delete"|"del")
+  "delete"|"del"|"d")
     if [ -z "$2" ]; then
       echo -e "\n${redbg} ERROR ${default} Missing model name for deletion.\n"
       echo -e "Usage: ${blue}$SCRIPT_NAME -m delete <model_name>${default}"
@@ -494,6 +494,10 @@ ManageModels() {
       echo -e "\n${redbg} ERROR ${default} Model ${red}$model_name${default} not found.\n"
       return 1
     fi
+    # Prompt the user for confirmation
+    echo
+    read -rp "Are you sure you want to delete model ${model_name}? [y/N]: " confirm_delete
+    [[ ! "$confirm_delete" =~ ^[Yy]$ ]] && return 1
     is_default=$(jq -r --arg model_name "$model_name" '.models[$model_name].default' "$CONFIG_FILENAME")
     jq --arg model_name "$model_name" 'del(.models[$model_name])' "$CONFIG_FILENAME" >temp.json && mv temp.json "$CONFIG_FILENAME"
     if [ "$is_default" = "true" ]; then
