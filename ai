@@ -42,7 +42,7 @@ CONFIG_FILENAME="config.json" # Configuration file
 CONVERSATIONS_FILENAME="conversations.json" # Stored conversations file
 TMP_CONVERSATIONS_FILENAME=".${CONVERSATIONS_FILENAME}.tmp" # swap conversation filename
 CONVERSATION_TOPIC="\"new conversation\"" # Default name for a new conversation
-CONVERSATION_BUFFER_LEN=30 # Conversation buffer length (number of messages the AI will try to remember)
+CONVERSATION_BUFFER_LEN=0 # Conversation buffer length (number of messages the AI will try to remember) - default: 0 (unlimited and handled on server side)
 RETRY_WAIT_TIME=3 # Retry wait time in case of server error
 IMAGE_GENERATION_MODE=false
 IMAGES_TO_GENERATE=1
@@ -98,7 +98,11 @@ ChatBubble() {
 SendChat() {
   # Param ("$@"): the full conversation buffer in JSON format
   # trim input to only contain the most recent CONVERSATION_BUFFER_LEN elements
-  input=$(jq ".[-$CONVERSATION_BUFFER_LEN:]" <<<"$@")
+  if [ "$CONVERSATION_BUFFER_LEN" -gt 0 ]; then
+    input=$(jq ".[-$CONVERSATION_BUFFER_LEN:]" <<<"$@")
+  else
+    input=$(jq '.' <<<"$@")
+  fi
   local model_endpoint api_key
   model_endpoint=$(jq -r '.models.'"$CURRENT_MODEL"'.endpoint' "$CONFIG_FILENAME")
   api_key=$(jq -r '.models.'"$CURRENT_MODEL"'.api_key' "$CONFIG_FILENAME")
@@ -447,8 +451,7 @@ ManageModels() {
     done
     ;;
   "add"|"a")
-    # debug: print all params
-    echo "Model name: $2, endpoint: $3, api_key: $4, default: $5"
+    # echo "Model name: $2, endpoint: $3, api_key: $4, default: $5" # DBG print all params
     if [ -z "$2" ] || [ -z "$3" ] || [ -z "$4" ]; then
       if [ "$#" -lt 2 ]; then
         AddNewModel false
@@ -536,14 +539,23 @@ ManageModels() {
 AddNewModel() {
   # $1 = force default model (true/false)
   local forcedefault="$1"
-  echo -e "\n${blue}Select the model to add:${default}"
-  echo -e "1) OpenAI/GPT4o-mini"
-  echo -e "2) OpenAI/GPT4o"
-  echo -e "3) Custom model"
+  echo -e "\n${dim}Select the model to add:${default}"
+  echo -e "0) ${green}Custom model (other OpenAI API-compatible endpoint)${default}"
+  echo -e "1) ${yellow}OpenAI${default}/GPT4o-mini"
+  echo -e "2) ${yellow}OpenAI${default}/GPT4o"
+  echo -e "3) ${blue}Google${default}/Gemini 1.5 Flash-8B (1M tokens context window)"
+  echo -e "4) ${blue}Google${default}/Gemini 1.5 Flash (1M tokens context window)"
+  echo -e "5) ${blue}Google${default}/Gemini 1.5 Pro (2M tokens context window)"
+  echo -e "6) ${blue}[PREVIEW] Google${default}/Gemini 2.0 Flash Experimental (1M tokens context window)"
+  echo -e "7) ${blue}[PREVIEW] Google${default}/Gemini Experimental 1206 (2M tokens context window)"
   echo
-  read -rp "Enter your choice (1-3): " model_choice
+  read -rp "Enter your choice: " model_choice
 
   case "$model_choice" in
+    0)
+      read -rp "Enter model name: " model_name
+      read -rp "Enter API endpoint (base url): " endpoint
+      ;;
     1)
       model_name="gpt-4o-mini"
       endpoint="https://api.openai.com/v1/chat/completions"
@@ -553,8 +565,24 @@ AddNewModel() {
       endpoint="https://api.openai.com/v1/chat/completions"
       ;;
     3)
-      read -rp "Enter model name: " model_name
-      read -rp "Enter API endpoint (base url): " endpoint
+      model_name="gemini-1.5-flash-8b"
+      endpoint="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+      ;;
+    4)
+      model_name="gemini-1.5-flash"
+      endpoint="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+      ;;
+    5)
+      model_name="gemini-1.5-pro"
+      endpoint="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+      ;;
+    6)
+      model_name="gemini-2.0-flash-exp"
+      endpoint="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+      ;;
+    7)
+      model_name="gemini-exp-1206"
+      endpoint="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
       ;;
     *)
       echo -e "${red}Invalid choice. Exiting.${default}"
@@ -643,7 +671,9 @@ DELETE_CONVERSATION=false
 CONTINUE_CONVERSATION=false
 CONVERSATION_ID_TO_CONTINUE=""
 tmpfile=""
+
 InitializeConfig
+
 if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
   # script was called with a command line parameter, or was invoked through a pipe
   if [ "$#" -ge 1 ]; then
