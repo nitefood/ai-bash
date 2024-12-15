@@ -104,32 +104,21 @@ SendChat() {
     input=$(jq '.' <<<"$@")
   fi
   local model_endpoint api_key
-  model_endpoint=$(jq -r '.models.'"$CURRENT_MODEL"'.endpoint' "$CONFIG_FILENAME")
-  api_key=$(jq -r '.models.'"$CURRENT_MODEL"'.api_key' "$CONFIG_FILENAME")
+  # TODO: make endpoint and apikey params to this function instead of looking them up in the config file for each message
+  model_endpoint=$(jq -r ".models.\"$CURRENT_MODEL\".endpoint" "$CONFIG_FILENAME")
+  api_key=$(jq -r ".models.\"$CURRENT_MODEL\".api_key" "$CONFIG_FILENAME")
   while true; do
     msg_buf_size=$(wc -c <<<"$input" | numfmt --to=iec)
     StatusbarMessage "Request sent (size: ${bluebg}$msg_buf_size${lightgreybg} bytes) Waiting for AI to reply"
-    if [[ "$model_endpoint" == *"completions" ]]; then
-      # completion model
-      prompt=$(jq -r '.[-1].content' <<<"$input")
-      response_json=$(
-        curl -s "$model_endpoint" \
-          -H "Content-Type: application/json" \
-          -H "Authorization: Bearer $api_key" \
-          -d '{ "model": "'"$CURRENT_MODEL"'", "prompt": "'"$prompt"'", "max_tokens": 1000 }'
-      )
-      ai_output=$(jq -r '.choices[0].text' <<<"$response_json")
-      ai_output=$(jq -c --arg ai_output "$ai_output" '{"role": "assistant", "content": $ai_output}')
-    else
-      # chat model
-      response_json=$(
-        curl -s "$model_endpoint" \
-          -H "Content-Type: application/json" \
-          -H "Authorization: Bearer $api_key" \
-          -d '{ "model": "'"$CURRENT_MODEL"'", "messages": '"$input"' }'
-      )
-      ai_output=$(jq -c '.choices[0].message' <<<"$response_json")
-    fi
+    response_json=$(
+      curl -s "$model_endpoint" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $api_key" \
+        -d '{ "model": "'"$CURRENT_MODEL"'", "messages": '"$input"' }'
+    )
+    # TODO: remove. save debug output to logfile
+    echo -e "\n_____\nRequest: $input\nResponse: $response_json\n_____" >>"${WORKING_DIR}/ai.log"
+    ai_output=$(jq -c '.choices[0].message' <<<"$response_json")
 
     if [ "$ai_output" = "null" ]; then
       StatusbarMessage
@@ -376,18 +365,19 @@ SwitchConversation() {
 ShowConversationsMenu() {
   if [ "$SAVE_CONVERSATION" = true ]; then
     ParseConversationsFile
-    echo -e "\n\n${yellowbg} Current conversation ${default}${yellow}\n  $CONVERSATION_TOPIC\n"
-    echo -en "${yellowbg} Previous conversations ${default}${yellow}"
+    echo -e "\n\n${yellowbg} Current conversation ${default}${yellow}"
+    printf "\n     %-50s %-30s" "$CONVERSATION_TOPIC" "${blue}${dim}[$CURRENT_MODEL]${default}${yellow}"
+    echo -en "\n\n${yellowbg} Previous conversations ${default}${yellow}"
     if [ "$num_previous_conversations" = "0" ]; then
       echo -en "\n  ${yellow}No previous/other conversations found!"
     else
       title_list=$(jq '.[].conversation_name' "$CONVERSATIONS_FILENAME")
-      model_list=$(jq '.[].model' "$CONVERSATIONS_FILENAME")
+      model_list=$(jq -r '.[].model' "$CONVERSATIONS_FILENAME")
       i=1
-      while read -r title && read -r model <&3; do
-        printf "\n%3d) %s - %s" "$i" "$title" "$model"
-        (( i++ ))
-      done < <(paste <(echo "$title_list") <(echo "$model_list") 3<&0)
+      paste <(echo "$title_list") <(echo "$model_list") | while IFS=$'\t' read -r title model; do
+      printf "\n%3d) %-50s %-30s" "$i" "$title" "${blue}${dim}[$model]${default}${yellow}"
+      (( i++ ))
+      done
     fi
     echo -e "\n\n  ${bold}0) START A NEW CONVERSATION${default}${yellow}"
     echo -e "\n\n${dim}Choose a conversation to continue, or\n${default}${yellow}[   0   ]${default}${yellow}${dim} to start a new conversation\n${default}${yellow}[ ENTER ]${default}${yellow}${dim} to return to the current one\n"
@@ -787,12 +777,12 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
           exit 0
         fi
         title_list=$(jq '.[].conversation_name' "$CONVERSATIONS_FILENAME")
-        model_list=$(jq '.[].model' "$CONVERSATIONS_FILENAME")
+        model_list=$(jq -r '.[].model' "$CONVERSATIONS_FILENAME")
         i=1
-        while read -r title && read -r model <&3; do
-          printf "\n%3d) %s - %s" "$i" "$title" "$model"
+        paste <(echo "$title_list") <(echo "$model_list") | while IFS=$'\t' read -r title model; do
+            printf "\n%3d) %-50s %-30s" "$i" "$title" "${blue}${dim}[$model]${default}${yellow}"
           (( i++ ))
-        done < <(paste <(echo "$title_list") <(echo "$model_list") 3<&0)
+        done
         echo -e "\n\n${default}Use ${blue}${bold}ai -c${default} to continue last conversation, ${blue}${bold}ai -c <id>${default} to continue a specific one, or ${blue}${bold}ai -d <id>${default} to delete it"
         exit
         ;;
