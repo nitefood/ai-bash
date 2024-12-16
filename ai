@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 
 # ╭──────────────────────────────────────────────────────────────────────────────────────╮
-# │      AI - a commandline AI client in BASH with conversation/completion support       │
+# │ AI - a commandline LLM chat client in BASH with conversation/completion/image        │
+# │ generation support                                                                   │
 # │                                                                                      │
 # │ Project homepage:                                                                    │
 # │                                                                                      │
@@ -115,7 +116,6 @@ SendChat() {
     input=$(jq '.' <<<"$@")
   fi
   local model_endpoint api_key
-  # TODO: make endpoint and apikey params to this function instead of looking them up in the config file for each message
   model_endpoint=$(jq -r ".models.\"$CURRENT_MODEL\".endpoint" "$CONFIG_FILENAME")
   api_key=$(jq -r ".models.\"$CURRENT_MODEL\".api_key" "$CONFIG_FILENAME")
   while true; do
@@ -158,12 +158,13 @@ SendChat() {
 
 GenerateImage() {
   local model_endpoint api_key
-  model_endpoint=$(jq -r '.models.'"$CURRENT_MODEL"'.endpoint' "$CONFIG_FILENAME")
+  # TODO: support more endpoints
+  model_endpoint="https://api.openai.com/v1/images/generations"
   api_key=$(jq -r '.models.'"$CURRENT_MODEL"'.api_key' "$CONFIG_FILENAME")
   while true; do
     msg_buf_size=$(wc -c <<<"$input" | numfmt --to=iec)
     [[ "$IMAGES_TO_GENERATE" -gt 1 ]] && plural="s" || plural=""
-    StatusbarMessage "Generating ${bluebg}$IMAGES_TO_GENERATE${lightgreybg} 1024x1024 image${plural}"
+    StatusbarMessage "Generating ${bluebg}$IMAGES_TO_GENERATE${lightgreybg} 1024x1024 image${plural} using DALL·E 2"
     response_json=$(
       curl -s "$model_endpoint" \
         -H "Content-Type: application/json" \
@@ -583,7 +584,7 @@ AddNewModel() {
   # $1 = force default model (true/false)
   local forcedefault="$1"
   echo -e "\n${dim}Select the model to add:${default}"
-  echo -e "0) ${green}Custom model (other OpenAI API-compatible endpoint)${default}"
+  echo -e "0) ${green}Custom model (requires OpenAI API-compatible endpoint)${default}"
   echo -e "1) ${yellow}OpenAI${default}/GPT4o-mini"
   echo -e "2) ${yellow}OpenAI${default}/GPT4o"
   echo -e "3) ${blue}Google${default}/Gemini 1.5 Flash-8B (1M tokens context window)"
@@ -759,7 +760,7 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
         echo -e "\n${bold}ai-bash v${AI_VERSION} Usage:${default}\n"
         echo -e "${dim}Show this help:${default}\n  ${blue}ai -h${default}"
         echo -e "${dim}Start a new interactive conversation:${default}\n  ${blue}ai${default}"
-        echo -e "${dim}One shot Q&A:${default}\n  ${blue}ai \"how many planets are there in the solar system?\"${default}"
+        echo -e "${dim}Single turn Q&A:${default}\n  ${blue}ai \"how many planets are there in the solar system?\"${default}"
         echo -e "${dim}Generate one or more images (default: 1):${default}\n  ${blue}ai -i [num] \"a cute cat\"${default}"
         echo -e "${dim}Submit data as part of the question:${default}\n  ${blue}cat file.txt | ai can you summarize the contents of this file?${default}"
         echo -e "${dim}List saved conversations:${default}\n  ${blue}ai -l${default}"
