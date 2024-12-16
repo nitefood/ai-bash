@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 
 # ╭──────────────────────────────────────────────────────────────────────────────────────╮
-# │      AI - a commandline AI client in BASH with conversation/completion support      │
+# │      AI - a commandline AI client in BASH with conversation/completion support       │
 # │                                                                                      │
 # │ Project homepage:                                                                    │
 # │                                                                                      │
-# │ https://github.com/nitefood/ai-bash                                             │
+# │ https://github.com/nitefood/ai-bash                                                  │
 # │                                                                                      │
 # │ Usage:                                                                               │
 # │                                                                                      │
@@ -71,19 +71,30 @@ StatusbarMessage() { # invoke without parameters to delete the status bar messag
   fi
 }
 
+ShowCommandsRecap() {
+  echo -en "\n${dim}${green}Enter an empty line to send your query, ${default}${green}?${dim} to view previous conversations or ${default}${green}!${dim} to switch model\n${default}${green}"
+}
+
 ChatBubble() {
   # Param ("$1"): speaker's name
   # Param ("$2"): speaker's name background color
   # Param ("$3"): chat bubble color
+  # Param ("$4"): total conversation tokens
   # Param [optional] (rest of the input): other text to display (e.g. conversation topic)
   local speaker="$1"; shift
   local bgcolor="$1"; shift
   local bubblecolor="$1"; shift
+  local total_tokens="$1"; shift
   # shellcheck disable=SC2124
   texttoshow="$@"
+  if [ -n "${total_tokens}" ] && [ "${total_tokens}" != "null" ]; then
+    tokencount_text=" ${dim}(total conversation tokens: ${total_tokens})${default}${bubblecolor}"
+  else
+    tokencount_text=""
+  fi
 
   [[ -n "${texttoshow}" ]] && texttoshow=" ${texttoshow}"
-  output="╞ ${bgcolor} ${speaker} ${default}${bubblecolor}${texttoshow} ╡"
+  output="╞ ${bgcolor} ${speaker} ${default}${bubblecolor}${texttoshow} ╡${tokencount_text}"
   output_len=$(( ${#speaker} + ${#texttoshow} + 2 ))
   echo -en "${bubblecolor}"
   printf '\n╭'
@@ -116,10 +127,11 @@ SendChat() {
         -H "Authorization: Bearer $api_key" \
         -d '{ "model": "'"$CURRENT_MODEL"'", "messages": '"$input"' }'
     )
-    # TODO: remove. save debug output to logfile
-    echo -e "\n_____\nRequest: $input\nResponse: $response_json\n_____" >>"${WORKING_DIR}/ai.log"
+    # DBG: save API call output to logfile
+    # echo -e "\n_____\nRequest: $input\nResponse: $response_json\n_____" >>"${WORKING_DIR}/ai.log"
     ai_output=$(jq -c '.choices[0].message' <<<"$response_json")
-
+    total_tokens=$(jq -r '.usage.total_tokens' <<<"$response_json")
+  
     if [ "$ai_output" = "null" ]; then
       StatusbarMessage
       error_type=$(jq -r '.error.type' <<<"$response_json")
@@ -140,7 +152,8 @@ SendChat() {
     fi
   done
   StatusbarMessage
-  echo "$ai_output"
+  # Combine JSON data and token count into a single JSON object for the response
+  jq -n --argjson ai_output "$ai_output" --arg total_tokens "$total_tokens" '$ai_output + {total_tokens: $total_tokens}'
 }
 
 GenerateImage() {
@@ -285,7 +298,7 @@ ReplayConversationMessages() {
       colorbg="$lightgreybg"
       ;;
     esac
-    ChatBubble "$speaker" "$colorbg" "$color"
+    ChatBubble "$speaker" "$colorbg" "$color" "null"
     if [ "$speaker" = "$CURRENT_MODEL" ]; then
       # preserve markdown formatting in bot replies
       MarkdownEcho "$rowcontent"
@@ -415,6 +428,7 @@ ShowConversationsMenu() {
       else
         # the users wants to continue a previous conversation
         SwitchConversation "$convmenuinput"
+        ShowCommandsRecap
       fi
     fi
   else
@@ -425,23 +439,9 @@ ShowConversationsMenu() {
 ManageModels() {
   case "$1" in
   "list"|"l")
-    echo -e "\n${yellowbg}Available models:${default}\n"
-    config_content=$(jq -r '.models' "$CONFIG_FILENAME")
-    printf "%-20s %-50s %-30s\n" "Model Name" "Endpoint" "API Key"
-    printf "%-20s %-50s %-30s\n" "----------" "--------" "-------"
-    for model_name in $(jq -r 'keys[]' <<<"$config_content"); do
-      endpoint=$(jq -r --arg model_name "$model_name" '.[$model_name].endpoint' <<<"$config_content")
-      api_key=$(jq -r --arg model_name "$model_name" '.[$model_name].api_key' <<<"$config_content")
-      is_default=$(jq -r --arg model_name "$model_name" '.[$model_name].default' <<<"$config_content")
-      default_label=""
-      if [ "$is_default" = true ]; then
-        default_label=" ${greenbg} DEFAULT ${default}"
-      fi
-      printf "%-20s %-50s %-30s%s\n" "$model_name" "$endpoint" "${api_key:0:5}***" "$default_label"
-    done
+    ListModels
     ;;
   "add"|"a")
-    # echo "Model name: $2, endpoint: $3, api_key: $4, default: $5" # DBG print all params
     if [ -z "$2" ] || [ -z "$3" ] || [ -z "$4" ]; then
       if [ "$#" -lt 2 ]; then
         AddNewModel false
@@ -519,11 +519,64 @@ ManageModels() {
     echo -e "\n${greenbg} SUCCESS ${default} Model ${green}$model_name${default} set as default.\n"
     ;;
   *)
+    ListModels
     echo -e "\n${redbg} ERROR ${default} Invalid action for model management.\n"
     echo -e "Available actions: ${blue}list, add, delete, setdefault${default}"
     return 1
     ;;
   esac
+}
+
+ListModels() {
+  # List the current models, their endpoints and redacted API key, and return
+  echo -e "\n${lightgreybg}Available models:${default}\n"
+  config_content=$(jq -r '.models' "$CONFIG_FILENAME")
+  printf "%-40s %-100s %-10s %-1s\n" "Model Name" "Endpoint" "API Key" "Is Default?"
+  printf "%-40s %-100s %-10s %-1s\n" "----------" "--------" "-------" "-----------"
+  for model_name in $(jq -r 'keys[]' <<<"$config_content"); do
+    endpoint=$(jq -r --arg model_name "$model_name" '.[$model_name].endpoint' <<<"$config_content")
+    api_key=$(jq -r --arg model_name "$model_name" '.[$model_name].api_key' <<<"$config_content")
+    is_default=$(jq -r --arg model_name "$model_name" '.[$model_name].default' <<<"$config_content")
+    if [ "$is_default" = true ]; then
+      printf "${greenbg}%-40s %-100s %-10s${default} ${green}%8s${default}\n" "$model_name" "$endpoint" "${api_key:0:5}***" "✓"
+    else
+      printf "%-40s %-100s %-10s\n" "$model_name" "$endpoint" "${api_key:0:5}***"
+    fi
+  done
+}
+
+ShowModelMenu() {
+  # Get list of available models
+  available_models=$(jq -r '.models | keys[]' "$CONFIG_FILENAME")
+  model_count=0
+  declare -A model_map
+
+  echo -e "\n${lightgreybg}Available models:${default}\n"
+  while IFS= read -r model_name; do
+    (( model_count++ ))
+    model_map[$model_count]=$model_name
+    
+    # Check if model is default
+    is_default=$(jq -r --arg model "$model_name" '.models[$model].default' "$CONFIG_FILENAME")
+    # Add labels for current and default models
+    labels=""
+    [[ "$model_name" == "$CURRENT_MODEL" ]] && labels+=" ${bluebg} CURRENT ${default}"
+    [[ "$is_default" == "true" ]] && labels+=" ${greenbg} DEFAULT ${default}"
+
+    printf "%3d) %-20s%s\n" "$model_count" "$model_name" "$labels"
+  done <<< "$available_models"
+
+  echo -e "\n${dim}Choose a model number or press ENTER to keep current model${default}"
+  read -rp "» " model_choice
+
+  if [[ -n "$model_choice" ]]; then
+    if [[ "$model_choice" =~ ^[0-9]+$ ]] && (( model_choice > 0 )) && (( model_choice <= model_count )); then
+      SetCurrentModel "${model_map[$model_choice]}"
+      echo -e "\n${dim}[Model switched to ${default}${CURRENT_MODEL}${dim}]${default}"
+    fi
+  else
+    echo -e "\n${dim}[Model unchanged]${default}"
+  fi
 }
 
 AddNewModel() {
@@ -631,7 +684,8 @@ InitializeConfig() {
 SetCurrentModel() {
   if [ -n "$1" ]; then
     # Model specified via command line
-    if jq -e --arg model "$1" '.models[$model] == null' "$CONFIG_FILENAME"; then
+    if jq -e --arg model "$1" '.models[$model] == null' "$CONFIG_FILENAME" &>/dev/null; then
+      echo "dentro"
       echo -e "${redbg} ERROR ${default} Model ${red}\"$1\"${default} not found in configuration."
       exit 1
     fi
@@ -675,7 +729,7 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
     # in this mode, getopts sets optchar to:
     # '?' -> unknown option
     # ':' -> missing mandatory parameter to the option
-    optspec=":hcd:lim:"
+    optspec=":hcd:lim"
     while getopts "$optspec" optchar; do {
       GetFullParamsFromCurrentPosition() {
         #
@@ -842,11 +896,7 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
     SwitchConversation "$conversation_id"
   elif [ "$IMAGE_GENERATION_MODE" = false ]; then
     # we're not in image generation mode
-    # Model option was passed, shift the passed input
-    # this is necessary for when the user only passes "-m" as an option, as shifting
-    # is not performed during option parsing
-    [[ "$1" == "-m" ]] && shift 2
-    SetCurrentModel "$1"
+    SetCurrentModel
     if [ ! -t 0 ]; then
       # we have input from stdin (script was invoked through a pipe)
       PIPED_SCRIPT=true
@@ -866,16 +916,19 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
     fi
 
     if [ -z "$userinput" ]; then
-      # no userinput was passed, we're here only because user passed the -m option and nothing else
-      # prepare the REPL and keep going
+      # no userinput was passed, prepare the REPL and keep going
       INTERACTIVE_CONVERSATION=true
       conversation_messages=0
     else
       userinput=$(echo -n "[{\"role\": \"user\", \"content\": $userinput}]")
       response_message=$(SendChat "$userinput")
       response_text=$(jq -r '.content' <<<"$response_message")
-      echo -e "\n${lightgreybg} AI ${default} replied:"
+      total_tokens=$(jq -r '.total_tokens' <<<"$response_message")
+      echo -e "\n${lightgreybg} $CURRENT_MODEL ${default} replied:"
       MarkdownEcho "$response_text"
+      if [ -n "$total_tokens" ] && [ "$total_tokens" != "null" ]; then
+        echo -e "${dim}[total tokens used: $total_tokens]${default}\n"      
+      fi
       if [ "$PIPED_SCRIPT" = true ]; then
         conversation_history=$(jq -c ". += $userinput" <<<"$conversation_history")
         conversation_history=$(jq -c ". += [$response_message]" <<<"$conversation_history")
@@ -928,16 +981,20 @@ fi
 #*############*#
 
 ParseConversationsFile
+ShowCommandsRecap
 
-echo -en "\n${green}Enter an empty line to send your query, or ${greenbg} ? ${default}${green} to view previous conversations)\n"
 while true; do
   userinput=""
   SHOW_CONVMENU=false
-  ChatBubble "YOU" "${greenbg}" "${green}" "(conversation topic: ${CONVERSATION_TOPIC}, model: ${CURRENT_MODEL})"
+  SHOW_MODELMENU=false
+  ChatBubble "YOU" "${greenbg}" "${green}" "null" "(conversation topic: ${CONVERSATION_TOPIC}, model: ${CURRENT_MODEL})"
   while true; do
     read -erp "» " inputline
     if [ "$inputline" = "?" ]; then
       SHOW_CONVMENU=true
+      break
+    elif [ "$inputline" = "!" ]; then
+      SHOW_MODELMENU=true
       break
     fi
     if [ -z "$inputline" ]; then
@@ -957,6 +1014,10 @@ while true; do
 
   if [ "$SHOW_CONVMENU" = true ]; then
     ShowConversationsMenu
+    ShowCommandsRecap
+  elif [ "$SHOW_MODELMENU" = true ]; then
+    ShowModelMenu
+    ShowCommandsRecap
   else
     # escape user input to create a JSON string, safe to pass on
     userinput=$(jq -Rs '.' <<<"$userinput")
@@ -971,7 +1032,8 @@ while true; do
       UpdateConversationTopic
     fi
     response_text=$(jq -r '.content' <<<"$response_message")
-    ChatBubble "$CURRENT_MODEL" "${lightgreybg}" "${white}"
+    total_tokens=$(jq -r '.total_tokens' <<<"$response_message")
+    ChatBubble "$CURRENT_MODEL" "${lightgreybg}" "${white}" "$total_tokens"
     MarkdownEcho "$response_text"
   fi
 done
