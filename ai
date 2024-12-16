@@ -955,7 +955,7 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
         conversation_messages=2
         UpdateConversationTopic
       else
-        # one shot Q&A, ask the user if they want to continue the conversation
+        # single turn Q&A, ask the user if they want to continue the conversation
         # or timeout after 3 seconds and quit without saving the conversation
         if read -r -s -t 5 -n 1 -p "${blue}Press any key within ${redbg} 5 ${default}${blue} seconds to continue this conversation...${default}"; then
           tput cub "$(tput cols)"
