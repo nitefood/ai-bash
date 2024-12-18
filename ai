@@ -15,8 +15,7 @@
 
 # TODO: customizable system prompting (to "prime" the assistant)
 # TODO: temperature setting and presets
-AI_VERSION="1.0-beta"
-SCRIPT_NAME=$(basename "$0")
+AI_VERSION="1.0-beta+1"
 
 # Color scheme
 green=$'\e[38;5;035m'
@@ -51,6 +50,7 @@ CONFIG_FILENAME="${WORKING_DIR}/${CONFIG_FILENAME}"
 CONVERSATIONS_FILENAME="${WORKING_DIR}/${CONVERSATIONS_FILENAME}"
 TMP_CONVERSATIONS_FILENAME="${WORKING_DIR}/${TMP_CONVERSATIONS_FILENAME}"
 CURRENT_MODEL=""
+CURSOR_POS=1
 
 StatusbarMessage() { # invoke without parameters to delete the status bar message
   if [ -n "$statusbar_message" ]; then
@@ -73,7 +73,7 @@ StatusbarMessage() { # invoke without parameters to delete the status bar messag
 }
 
 ShowCommandsRecap() {
-  echo -en "\n${dim}${green}Enter an empty line to send your query, ${default}${green}?${dim} to view previous conversations or ${default}${green}!${dim} to switch model\n${default}${green}"
+  echo -en "\n${dim}${green}Enter an empty line to send your query, ${default}${green}?${dim} to view previous conversations or ${default}${green}!${dim} to change model\n${default}${green}"
 }
 
 ChatBubble() {
@@ -81,22 +81,32 @@ ChatBubble() {
   # Param ("$2"): speaker's name background color
   # Param ("$3"): chat bubble color
   # Param ("$4"): total conversation tokens
-  # Param [optional] (rest of the input): other text to display (e.g. conversation topic)
+  # Param ("$5"): model name
+  # [optional] (rest of the input): conversation topic
   local speaker="$1"; shift
   local bgcolor="$1"; shift
   local bubblecolor="$1"; shift
   local total_tokens="$1"; shift
+  local model_name="$1"; shift
   # shellcheck disable=SC2124
-  texttoshow="$@"
+  conversation_topic="$@"
   if [ -n "${total_tokens}" ] && [ "${total_tokens}" != "null" ]; then
     tokencount_text=" ${dim}(total conversation tokens: ${total_tokens})${default}${bubblecolor}"
   else
     tokencount_text=""
   fi
 
-  [[ -n "${texttoshow}" ]] && texttoshow=" ${texttoshow}"
-  output="╞ ${bgcolor} ${speaker} ${default}${bubblecolor}${texttoshow} ╡${tokencount_text}"
-  output_len=$(( ${#speaker} + ${#texttoshow} + 2 ))
+  conversation_topic_colorsstripped=""
+  if [ -n "${conversation_topic}" ]; then
+    conversation_topic=" ${dim}[Topic: ${default}${bubblecolor}${conversation_topic}${dim}"
+    [[ "$speaker" != "$model_name" ]] && conversation_topic+=", Model: ${default}${bubblecolor}${model_name}${dim}"
+    conversation_topic+="]"
+    # strip colors from $conversation_topic for bubble border length calculation
+    # TODO coreutils fixup for MacOS sed compatibility (force gsed)
+    conversation_topic_colorsstripped=$(sed -r 's/\x1B\[[0-9;]*[JKmsu]//g' <<<"$conversation_topic")
+  fi
+  output="╞ ${bgcolor} ${speaker} ${default}${bubblecolor}${conversation_topic}${default}${bubblecolor} ╡${tokencount_text}"
+  output_len=$(( ${#speaker} + ${#conversation_topic_colorsstripped} + 2 ))
   echo -en "${bubblecolor}"
   printf '\n╭'
   printf '%.s─' $(seq 1 $(( output_len + 2 )) )
@@ -284,6 +294,8 @@ SaveConversation() {
 
 ReplayConversationMessages() {
   # displays the messages in the $conversation_history buffer
+  # $1 = model name for this conversation
+  conversation_model="$1"
   for row in $(jq -rc '.[]' <<<"$conversation_history"); do
     speaker=$(jq -r '.role' <<<"$row")
     rowcontent=$(jq -r '.content' <<<"$row")
@@ -294,14 +306,14 @@ ReplayConversationMessages() {
       colorbg="$greenbg"
       ;;
     "assistant")
-      speaker="$CURRENT_MODEL"
+      speaker="$conversation_model"
       color="$white"
       colorbg="$lightgreybg"
       ;;
     esac
-    ChatBubble "$speaker" "$colorbg" "$color" "null"
-    if [ "$speaker" = "$CURRENT_MODEL" ]; then
-      # preserve markdown formatting in bot replies
+    ChatBubble "$speaker" "$colorbg" "$color" "null" "$speaker"
+    if [ "$speaker" = "$conversation_model" ]; then
+      # preserve markdown formatting in LLM replies
       MarkdownEcho "$rowcontent"
     else
       for line in $(echo -e "$rowcontent"); do
@@ -319,6 +331,7 @@ Ctrl_C() {
     rm "${tmpfile}"*
   fi
   tput sgr0
+  tput cnorm
   exit 0
 }
 
@@ -367,13 +380,20 @@ SwitchConversation() {
   conversation_messages=$(jq 'length' <<<"$conversation_history")
   # and switch the topic and model
   CONVERSATION_TOPIC=$(jq '.conversation_name' <<<"$conversation_json")
-  CURRENT_MODEL=$(jq -r '.model' <<<"$conversation_json")
+  conversation_model=$(jq -r '.model' <<<"$conversation_json")
+  # show the old conversation to the user
+  ReplayConversationMessages "$conversation_model"
+  if ! SetCurrentModel "$conversation_model"; then
+    # the model for this conversation is not found in the configuration file, try to switch to the default model
+    if ! SetCurrentModel; then
+      # the default model is not found in the configuration file, cannot continue
+      exit 1
+    fi
+  fi
   # delete the old conversation from the conversations file.
   # an updated version of this conversation will be saved at the end of this session
   jq 'del (.['"$1"'])' "${CONVERSATIONS_FILENAME}" > "${TMP_CONVERSATIONS_FILENAME}" && \
     mv "${TMP_CONVERSATIONS_FILENAME}" "${CONVERSATIONS_FILENAME}"
-  # show the old conversation to the user
-  ReplayConversationMessages
 }
 
 ShowConversationsMenu() {
@@ -429,7 +449,6 @@ ShowConversationsMenu() {
       else
         # the users wants to continue a previous conversation
         SwitchConversation "$convmenuinput"
-        ShowCommandsRecap
       fi
     fi
   else
@@ -437,205 +456,323 @@ ShowConversationsMenu() {
   fi
 }
 
-ManageModels() {
-  case "$1" in
-  "list"|"l")
-    ListModels
-    ;;
-  "add"|"a")
-    if [ -z "$2" ] || [ -z "$3" ] || [ -z "$4" ]; then
-      if [ "$#" -lt 2 ]; then
-        AddNewModel false
-      else
-        echo -e "\n${redbg} ERROR ${default} Missing parameters for adding a model.\n"
-        echo -e "Usage: ${blue}$SCRIPT_NAME -m add <model_name> <endpoint> <api_key> [default]${default}"
-        echo -e "(or just ${blue}$SCRIPT_NAME -m add${default} to add interactively)"
-        return 1
-      fi
-    else
-      local model_name="$2"
-      local endpoint="$3"
-      local api_key="$4"
-      local default_value=false
-      if [ "$5" == "default" ]; then
-        default_value=true
-      fi
-      jq --arg model_name "$model_name" \
-        --arg endpoint "$endpoint" \
-        --arg api_key "$api_key" \
-        --argjson default "$default_value" \
-        '.models += {($model_name): {endpoint: $endpoint, api_key: $api_key, default: $default}}' "$CONFIG_FILENAME" >temp.json && mv temp.json "$CONFIG_FILENAME"
-      echo -e "\n${greenbg} SUCCESS ${default} Model ${green}$model_name${default} added successfully.\n"
-      if [ "$default_value" = true ]; then
-        ManageModels "setdefault" "$model_name"
-      fi
-    fi
-    ;;
-  "delete"|"del"|"d")
-    if [ -z "$2" ]; then
-      echo -e "\n${redbg} ERROR ${default} Missing model name for deletion.\n"
-      echo -e "Usage: ${blue}$SCRIPT_NAME -m delete <model_name>${default}"
-      return 1
-    fi
-    local model_name="$2"
-    local model_count
-    model_count=$(jq '.models | length' "$CONFIG_FILENAME")
-    if [ "$model_count" -le 1 ]; then
-      echo -e "\n${redbg} ERROR ${default} Cannot delete the only available model.\n"
-      return 1
-    fi
-    if ! jq -e --arg model_name "$model_name" '.models[$model_name]' "$CONFIG_FILENAME" >/dev/null; then
-      echo -e "\n${redbg} ERROR ${default} Model ${red}$model_name${default} not found.\n"
-      return 1
-    fi
-    # Prompt the user for confirmation
-    echo
-    read -rp "Are you sure you want to delete model ${model_name}? [y/N]: " confirm_delete
-    [[ ! "$confirm_delete" =~ ^[Yy]$ ]] && return 1
-    is_default=$(jq -r --arg model_name "$model_name" '.models[$model_name].default' "$CONFIG_FILENAME")
-    jq --arg model_name "$model_name" 'del(.models[$model_name])' "$CONFIG_FILENAME" >temp.json && mv temp.json "$CONFIG_FILENAME"
-    if [ "$is_default" = "true" ]; then
-      first_model=$(jq -r '.models | keys[0]' "$CONFIG_FILENAME")
-      jq --arg first_model "$first_model" '.models[$first_model].default = true' "$CONFIG_FILENAME" >temp.json && mv temp.json "$CONFIG_FILENAME"
-      echo -e "\n${yellowbg} WARNING ${default} Default model deleted. ${yellow}$first_model${default} set as new default.\n"
-    fi
-    echo -e "\n${greenbg} SUCCESS ${default} Model ${green}$model_name${default} deleted successfully.\n"
-    ;;
-  "setdefault"|"default")
-    if [ -z "$2" ]; then
-      echo -e "\n${redbg} ERROR ${default} Missing model name for setting as default.\n"
-      echo -e "Usage: ${blue}$SCRIPT_NAME -m setdefault <model_name>${default}"
-      return 1
-    fi
-    local model_name="$2"
-    if ! jq -e --arg model_name "$model_name" '.models[$model_name]' "$CONFIG_FILENAME" >/dev/null; then
-      echo -e "\n${redbg} ERROR ${default} Model ${red}$model_name${default} not found.\n"
-      return 1
-    fi
-    # First, set all models to default: false
-    config_content=$(jq '.models |= map_values(.default = false)' "$CONFIG_FILENAME")
-    # Then, set the specified model to default: true
-    config_content=$(jq --arg model_name "$model_name" '.models[$model_name].default = true' <<<"$config_content")
-    echo "$config_content" > "$CONFIG_FILENAME"
-    echo -e "\n${greenbg} SUCCESS ${default} Model ${green}$model_name${default} set as default.\n"
-    ;;
-  *)
-    ListModels
-    echo -e "\n${redbg} ERROR ${default} Invalid action for model management.\n"
-    echo -e "Available actions: ${blue}list, add, delete, setdefault${default}"
+# Function to set a model as default in the configuration file
+SetDefaultModel(){
+  # $1 = model name
+  local model_name="$1"
+  if ! jq -e --arg model_name "$model_name" '.models[$model_name]' "$CONFIG_FILENAME" >/dev/null; then
+    echo -e "\n${redbg} ERROR ${default} Model ${red}$model_name${default} not found.\n"
     return 1
-    ;;
-  esac
+  fi
+  # First, set all models to default: false
+  config_content=$(jq '.models |= map_values(.default = false)' "$CONFIG_FILENAME")
+  # Then, set the specified model to default: true
+  config_content=$(jq --arg model_name "$model_name" '.models[$model_name].default = true' <<<"$config_content")
+  echo "$config_content" > "$CONFIG_FILENAME"
+  echo -e "${greenbg} SUCCESS ${default} Model ${green}$model_name${default} set as default."
 }
 
-ListModels() {
-  # List the current models, their endpoints and redacted API key, and return
+# Function to draw the model selection menu with arrow
+DrawModelMenu() {
+  # $1 = total number of models
+  # $2 = fullredraw (true -> reload models and redraw menu | false -> just move the cursor for speed) [DEFAULT: true]
+  # the global CURSOR_POS contains the current position in the menu
+  local model_count=$1
+  local fullredraw=$2
+  local i=1
+  
+  if [ "$fullredraw" = false ]; then
+    # We're here because the user moved the arrow cursor while navigating the menu
+    # We don't need to reload the models and redraw the whole menu, just move the cursor
+    # save cursor pos
+    tput sc
+    # blank out the cursor in every line except for CURSOR_POS
+    for ((i=1; i<=model_count; i++)); do
+      [[ $i -eq "$CURSOR_POS" ]] && arrow=" ${blue}→${default}" || arrow="  "
+      tput cup $(( i+4 )) 0
+      echo -n "$arrow"
+    done
+    # restore cursor pos
+    tput rc
+    return
+  fi
+  
+  # Full redraw mode. Hide cursor and clear screen
+  tput civis
+  tput clear
   echo -e "\n${lightgreybg}Available models:${default}\n"
   config_content=$(jq -r '.models' "$CONFIG_FILENAME")
-  printf "%-40s %-100s %-10s %-1s\n" "Model Name" "Endpoint" "API Key" "Is Default?"
-  printf "%-40s %-100s %-10s %-1s\n" "----------" "--------" "-------" "-----------"
-  for model_name in $(jq -r 'keys[]' <<<"$config_content"); do
+  # get terminal width to decide wether to show the full menu or just the model names and the default checkmark
+  SHOW_COMPACT_MENU=false
+  termwidth=$(tput cols)
+  if [ "$termwidth" -gt 167 ]; then
+    # show full menu
+    printf "   %-40s %-100s %-10s %-1s\n" "Model Name" "Endpoint" "API Key" "Is Default?"
+    printf "   %-40s %-100s %-10s %-1s\n" "----------" "--------" "-------" "-----------"
+  else
+    # show compact menu, only arrow, model name and Is Default? columns
+    SHOW_COMPACT_MENU=true
+    printf "   %-40s %-1s\n" "Model Name" "Is Default?"
+    printf "   %-40s %-1s\n" "----------" "-----------"
+  fi
+
+  while IFS= read -r model_name; do
+    is_default=$(jq -r --arg model_name "$model_name" '.[$model_name].default' <<<"$config_content")
     endpoint=$(jq -r --arg model_name "$model_name" '.[$model_name].endpoint' <<<"$config_content")
     api_key=$(jq -r --arg model_name "$model_name" '.[$model_name].api_key' <<<"$config_content")
-    is_default=$(jq -r --arg model_name "$model_name" '.[$model_name].default' <<<"$config_content")
-    if [ "$is_default" = true ]; then
-      printf "${greenbg}%-40s %-100s %-10s${default} ${green}%8s${default}\n" "$model_name" "$endpoint" "${api_key:0:5}***" "✓"
+    # if CURRENT_MODEL is not set, use CURSOR_POS to set the arrow
+    # otherwise match the model name with CURRENT_MODEL and set the arrow accordingly
+    if [ -z "$CURRENT_MODEL" ]; then
+      # no current model set, position the arrow on the model at CURSOR_POS
+      [[ $i -eq "$CURSOR_POS" ]] && arrow="${blue}→${default}" || arrow=" "
+    elif [ "$model_name" = "$CURRENT_MODEL" ]; then
+      # current model is set, and it matches the current model in the loop. show the arrow and update CURSOR_POS
+      CURSOR_POS="$i"
+      arrow="${blue}→${default}"
+      # also unset current model so that the arrow is now the only indicator of the current model as the user moves around in the menu
+      CURRENT_MODEL=""
     else
-      printf "%-40s %-100s %-10s\n" "$model_name" "$endpoint" "${api_key:0:5}***"
+      # current model is set, but it doesn't match the current model in the loop
+      arrow=" "
     fi
-  done
+    if [ "$is_default" = true ]; then
+      modelname_bgcolor="${greenbg}"
+      default_checkmark="✓"
+    else
+      modelname_bgcolor="${default}"
+      default_checkmark=""
+    fi
+    if [ "$SHOW_COMPACT_MENU" = true ]; then
+      printf " ${arrow} ${modelname_bgcolor}%-40s${default} ${green}%8s${default}\n" "$model_name" "${default_checkmark}"
+    else
+      printf " ${arrow} ${modelname_bgcolor}%-40s${default} %-100s %-10s${default} ${green}%8s${default}\n" "$model_name" "$endpoint" "${api_key:0:5}***" "${default_checkmark}"
+    fi
+    ((i++))
+  done < <(jq -r 'keys[]' <<<"$config_content")
+
+  echo -e "\n${dim}Use the arrow keys to navigate.\n\nPress ENTER to select a model\n${default}${blue}a${default}${dim} to add a new model"
+  echo -e "${default}${blue}d${default}${dim} to delete a model"
+  echo -e "${default}${blue}s${default}${dim} to set a model as default${default}"
+  echo -e "${default}${blue}q${default}${dim} to quit${default}"
 }
 
-ShowModelMenu() {
-  # Get list of available models
-  available_models=$(jq -r '.models | keys[]' "$CONFIG_FILENAME")
-  model_count=0
-  declare -A model_map
+# Main model management function
+ManageModels() {
+  if [ -z "$1" ]; then
+    # if the user invoked "ai -m" without any parameters, pop up the model selection menu
 
-  echo -e "\n${lightgreybg}Available models:${default}\n"
-  while IFS= read -r model_name; do
-    (( model_count++ ))
-    model_map[$model_count]=$model_name
-    
-    # Check if model is default
-    is_default=$(jq -r --arg model "$model_name" '.models[$model].default' "$CONFIG_FILENAME")
-    # Add labels for current and default models
-    labels=""
-    [[ "$model_name" == "$CURRENT_MODEL" ]] && labels+=" ${bluebg} CURRENT ${default}"
-    [[ "$is_default" == "true" ]] && labels+=" ${greenbg} DEFAULT ${default}"
+    # Create a trap to handle window resizing
+    trap 'tput clear; DrawModelMenu "$model_count" true' WINCH
 
-    printf "%3d) %-20s%s\n" "$model_count" "$model_name" "$labels"
-  done <<< "$available_models"
+    # count models
+    model_count=$(jq -r '.models | keys | length' "$CONFIG_FILENAME")
 
-  echo -e "\n${dim}Choose a model number or press ENTER to keep current model${default}"
-  read -rp "» " model_choice
+    while [ "$model_count" -eq 0 ]; do
+      tput clear
+      echo "${dim}No models found in the configuration file. Please add one below.${default}"
+      AddNewModel true
+      sleep 3s
+      model_count=$(jq -r '.models | keys | length' "$CONFIG_FILENAME")
+    done
+    # Draw initial menu
+    DrawModelMenu "$model_count"
 
-  if [[ -n "$model_choice" ]]; then
-    if [[ "$model_choice" =~ ^[0-9]+$ ]] && (( model_choice > 0 )) && (( model_choice <= model_count )); then
-      SetCurrentModel "${model_map[$model_choice]}"
-      echo -e "\n${dim}[Model switched to ${default}${CURRENT_MODEL}${dim}]${default}"
-    fi
+    # Handle key input
+    while true; do
+      read -rsn1 key
+      case "$key" in
+        $'\x1B')  # ESC sequence
+          read -rsn1 -t 0.1 key
+          if [ "$key" = "[" ]; then
+            read -rsn1 -t 0.1 key
+            case "$key" in
+              "A")  # Up arrow
+                ((CURSOR_POS--))
+                [ $CURSOR_POS -lt 1 ] && CURSOR_POS="$model_count"
+                DrawModelMenu "$model_count" false
+                ;;
+              "B")  # Down arrow
+                ((CURSOR_POS++))
+                [ "$CURSOR_POS" -gt "$model_count" ] && CURSOR_POS=1
+                DrawModelMenu "$model_count" false
+                ;;
+            esac
+          fi
+          ;;
+        "")  # Enter key, Select model
+          tput cnorm # show cursor
+          model_name=$(jq -r ".models | keys[$((CURSOR_POS-1))]" "$CONFIG_FILENAME")
+          SetCurrentModel "$model_name"
+          break
+          ;;
+        "a"|"A")  # Add model
+          tput cnorm # show cursor
+          AddNewModel false
+          sleep 3s
+          model_count=$(jq -r '.models | keys | length' "$CONFIG_FILENAME")
+          CURSOR_POS=1
+          DrawModelMenu "$model_count"
+          ;;
+        "d"|"D")  # Delete model
+          tput cnorm # show cursor
+          model_name=$(jq -r ".models | keys[$((CURSOR_POS-1))]" "$CONFIG_FILENAME")
+          if ! jq -e --arg model_name "$model_name" '.models[$model_name]' "$CONFIG_FILENAME" >/dev/null; then
+            echo -e "\n${redbg} ERROR ${default} Model ${red}$model_name${default} not found.\n"
+            return 1
+          fi
+          # Prompt the user for confirmation
+          echo -en "\n${yellowbg} WARNING ${default} Are you sure you want to delete model ${yellow}$model_name${default}? [y/N]: "
+          read -r confirm_delete
+          if [[ "$confirm_delete" =~ ^[Yy]$ ]]; then
+            is_default=$(jq -r --arg model_name "$model_name" '.models[$model_name].default' "$CONFIG_FILENAME")
+            jq --arg model_name "$model_name" 'del(.models[$model_name])' "$CONFIG_FILENAME" >temp.json && mv temp.json "$CONFIG_FILENAME"
+            if [ "$is_default" = "true" ]; then
+              first_model=$(jq -r '.models | keys[0]' "$CONFIG_FILENAME")
+              if [ "$first_model" = "null" ]; then
+                echo -e "${yellowbg} WARNING ${default} Default model deleted"
+              else
+                jq --arg first_model "$first_model" '.models[$first_model].default = true' "$CONFIG_FILENAME" >temp.json && mv temp.json "$CONFIG_FILENAME"
+                echo -e "${yellowbg} WARNING ${default} Default model deleted. ${yellow}$first_model${default} set as new default."
+              fi
+            fi
+            echo -e "${greenbg} SUCCESS ${default} Model ${green}$model_name${default} deleted successfully."
+            (( model_count-- ))
+            CURSOR_POS=1
+            sleep 3s
+          fi
+          while [ "$model_count" -eq 0 ]; do
+            tput clear
+            echo "${dim}No models found in the configuration file. Please add one below.${default}"
+            AddNewModel true
+            sleep 3s
+            model_count=$(jq -r '.models | keys | length' "$CONFIG_FILENAME")
+          done
+          DrawModelMenu "$model_count"
+          ;;
+        "s"|"S")  # Set default model
+          model_name=$(jq -r ".models | keys[$((CURSOR_POS-1))]" "$CONFIG_FILENAME")
+          echo
+          SetDefaultModel "$model_name"
+          sleep 1s
+          DrawModelMenu "$model_count" true
+          ;;
+        "q"|"Q")  # Quit
+          tput cnorm # show cursor
+          exit 0
+          ;;
+      esac
+    done
   else
-    echo -e "\n${dim}[Model unchanged]${default}"
+    # treat $1 as a model name and switch to it (e.g. "ai -m gpt4o"). Quit if model is not found
+    if ! SetCurrentModel "$1"; then
+      exit 1
+    fi
+    # shift the arguments and let the script handle the rest of the input (if any)
+    shift
   fi
 }
 
 AddNewModel() {
   # $1 = force default model (true/false)
   local forcedefault="$1"
-  echo -e "\n${dim}Select the model to add:${default}"
-  echo -e "0) ${green}Custom model (requires OpenAI API-compatible endpoint)${default}"
-  echo -e "1) ${yellow}OpenAI${default}/GPT4o-mini"
-  echo -e "2) ${yellow}OpenAI${default}/GPT4o"
-  echo -e "3) ${blue}Google${default}/Gemini 1.5 Flash-8B (1M tokens context window)"
-  echo -e "4) ${blue}Google${default}/Gemini 1.5 Flash (1M tokens context window)"
-  echo -e "5) ${blue}Google${default}/Gemini 1.5 Pro (2M tokens context window)"
-  echo -e "6) ${blue}[PREVIEW] Google${default}/Gemini 2.0 Flash Experimental (1M tokens context window)"
-  echo -e "7) ${blue}[PREVIEW] Google${default}/Gemini Experimental 1206 (2M tokens context window)"
+  local provider=""
+  echo -e "\n${dim}Select the provider to list currently available models:${default}\n"
+  echo -e "1) ${yellow}OpenAI ${dim}(GPT4o, o1, etc.)${default}"
+  echo -e "2) ${blue}Google ${dim}(Gemini, Learn LM, etc.)${default}"
+  echo -e "3) ${green}Custom ${dim}(e.g. Ollama/LM Studio/llama.cpp)${default}"
   echo
-  read -rp "Enter your choice: " model_choice
 
-  case "$model_choice" in
-    0)
-      read -rp "Enter model name: " model_name
-      read -rp "Enter API endpoint (base url): " endpoint
-      ;;
+  read -rp "Enter your choice: " provider_choice
+  case "$provider_choice" in
     1)
-      model_name="gpt-4o-mini"
+      provider="OpenAI"
+      model_list_endpoint="https://api.openai.com/v1/models"
       endpoint="https://api.openai.com/v1/chat/completions"
       ;;
     2)
-      model_name="gpt-4o"
-      endpoint="https://api.openai.com/v1/chat/completions"
+      provider="Google"
+      model_list_endpoint="https://generativelanguage.googleapis.com/v1beta/models"
+      endpoint="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
       ;;
     3)
-      model_name="gemini-1.5-flash-8b"
-      endpoint="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-      ;;
-    4)
-      model_name="gemini-1.5-flash"
-      endpoint="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-      ;;
-    5)
-      model_name="gemini-1.5-pro"
-      endpoint="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-      ;;
-    6)
-      model_name="gemini-2.0-flash-exp"
-      endpoint="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-      ;;
-    7)
-      model_name="gemini-exp-1206"
-      endpoint="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+      provider="custom"
+      read -rp "Enter API endpoint ${underline}BASE URL${default} ${dim}- e.g. http://127.0.0.1:11434 (Ollama) or http://127.0.0.1:1234 (LM Studio)${default}: " endpoint
+      model_list_endpoint="${endpoint}/v1/models"
+      endpoint="${endpoint}/v1/chat/completions"
       ;;
     *)
       echo -e "${red}Invalid choice. Exiting.${default}"
-      return 1
+      exit 1
+      ;;
+  esac
+  
+  # Prompt for API key, display asterisks for each character entered
+  api_key=""
+  exec < /dev/tty # Ensure input comes from terminal
+  stty -echo # Disable terminal echo
+  echo -n "Enter your $provider API Key (press ENTER to skip): "
+  while IFS= read -r -n1 char; do
+    [[ -z "$char" ]] && { echo; break; } # Exit on Enter key
+    [[ "$char" == $'\177' ]] && # Handle backspace 
+      [[ ${#api_key} -gt 0 ]] && {
+        api_key=${api_key%?}
+        echo -en "\b \b"
+      } && continue
+    api_key+="$char"
+    echo -n "*"
+  done
+  stty echo # Restore terminal echo
+  [[ -z "$api_key" ]] && api_key="XXX"
+
+  echo
+  StatusbarMessage "Fetching available models for $provider"
+  # Get list of available models
+  case "$provider" in
+    "OpenAI")
+      model_list=$(curl -s "${model_list_endpoint}" -H "Authorization: Bearer ${api_key}" | jq -r '.data[].id' 2>/dev/null)
+      model_display_color="${yellow}"
+      ;;
+    "custom")
+      model_list=$(curl -s "${model_list_endpoint}" -H "Authorization: Bearer ${api_key}" | jq -r '.data[].id' 2>/dev/null)
+      model_display_color="${green}"
+      ;;
+    "Google")
+      model_list=$(curl -s "${model_list_endpoint}?key=${api_key}" | jq -r '.models[].name | split("/") | last' 2>/dev/null)
+      model_display_color="${blue}"
       ;;
   esac
 
-  read -rp "Enter API Key (press ENTER to skip): " api_key
-  [[ -z "$api_key" ]] && api_key="XXX"
+  # Convert model list to array
+  if [ -z "$model_list" ]; then
+    StatusbarMessage
+    echo -e "${red}No models found or API error. Check your API key.${default}"
+    return 1
+  else
+      mapfile -t arr_model_list <<<"$model_list"
+  fi
+
+  StatusbarMessage
+
+  # Display model selection menu
+  echo -e "${dim}Available models for provider ${lightgreybg}${provider}${default}${dim}:${default}\n"
+  for i in "${!arr_model_list[@]}"; do
+    printf "%3d) %s\n" "$((i+1))" "${model_display_color}${arr_model_list[$i]}${default}"
+  done
+  echo
+
+  # Get user selection
+  while true; do
+    read -rp "Enter your choice: " model_choice
+    if [[ "$model_choice" =~ ^[0-9]+$ ]] && \
+       (( model_choice > 0 )) && \
+       (( model_choice <= ${#arr_model_list[@]} )); then
+      model_name="${arr_model_list[$((model_choice-1))]}"
+      break
+    else
+      echo -e "${red}Invalid selection. Please choose a number between 1 and ${#arr_model_list[@]}.${default}"
+    fi
+  done
+
   if [ "$forcedefault" = true ]; then
     default_value=true
   else
@@ -648,9 +785,9 @@ AddNewModel() {
     --argjson default "$default_value" \
     '.models += {($model_name): {endpoint: $endpoint, api_key: $api_key, default: $default}}' "$CONFIG_FILENAME" >temp.json && mv temp.json "$CONFIG_FILENAME"
 
-  echo -e "\n${greenbg} SUCCESS ${default} Model ${green}$model_name${default} added successfully.\n"
+  echo -e "${greenbg} SUCCESS ${default} Model ${green}$model_name${default} added successfully."
   if [ "$default_value" = true ]; then
-    ManageModels "setdefault" "$model_name"
+    SetDefaultModel "$model_name"
   fi
 }
 
@@ -686,20 +823,20 @@ SetCurrentModel() {
   if [ -n "$1" ]; then
     # Model specified via command line
     if jq -e --arg model "$1" '.models[$model] == null' "$CONFIG_FILENAME" &>/dev/null; then
-      echo "dentro"
-      echo -e "${redbg} ERROR ${default} Model ${red}\"$1\"${default} not found in configuration."
-      exit 1
+      echo -e "${yellowbg} WARNING ${default}${yellow}${dim} Model ${default}${yellow}\"$1\"${dim} not found in configuration.${default}"
+      return 1
     fi
     CURRENT_MODEL="$1"
   else
     # Determine default model
     default_model=$(jq -r '.models | to_entries[] | select(.value.default == true) | .key' "$CONFIG_FILENAME")
     if [ -z "$default_model" ]; then
-      echo -e "${redbg} ERROR ${default} No default model set in configuration."
-      exit 1
+      echo -e "${redbg} ERROR ${default}${red} No default model set in configuration.${default}"
+      return 1
     fi
     CURRENT_MODEL="$default_model"
   fi
+  echo -e "\n${blue}${dim}[Model set to ${default}${blue}${CURRENT_MODEL}${dim}]${default}"
 }
 
 #*
@@ -717,6 +854,7 @@ CONTINUE_CONVERSATION=false
 CONVERSATION_ID_TO_CONTINUE=""
 tmpfile=""
 
+trap Ctrl_C INT
 InitializeConfig
 
 if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
@@ -759,17 +897,17 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
         # display usage help
         echo -e "\n${bold}ai-bash v${AI_VERSION} Usage:${default}\n"
         echo -e "${dim}Show this help:${default}\n  ${blue}ai -h${default}"
-        echo -e "${dim}Start a new interactive conversation:${default}\n  ${blue}ai${default}"
-        echo -e "${dim}Single turn Q&A:${default}\n  ${blue}ai \"how many planets are there in the solar system?\"${default}"
+        echo -e "${dim}Manage models (add/delete/set default):${default}\n  ${blue}ai -m${default}"
+        echo -e "${dim}Start a new interactive conversation:${default}\n  ${blue}ai [-m <modelname>]${default}"
+        echo -e "${dim}Single turn Q&A:${default}\n  ${blue}ai [-m <modelname>] \"how many planets are there in the solar system?\"${default}"
         echo -e "${dim}Generate one or more images (default: 1):${default}\n  ${blue}ai -i [num] \"a cute cat\"${default}"
-        echo -e "${dim}Submit data as part of the question:${default}\n  ${blue}cat file.txt | ai can you summarize the contents of this file?${default}"
+        echo -e "${dim}Submit data as part of the question:${default}\n  ${blue}cat file.txt | ai [-m <modelname>] can you summarize the contents of this file?${default}"
         echo -e "${dim}List saved conversations:${default}\n  ${blue}ai -l${default}"
         echo -e "${dim}Continue last conversation:${default}\n  ${blue}ai -c${default}"
         echo -e "${dim}Continue specific conversation:${default}\n  ${blue}ai -c <conversation_id>${default}"
         echo -e "${dim}Delete a conversation:${default}\n  ${blue}ai -d <conversation_id>${default}"
         echo -e "${dim}Delete multiple conversations:${default}\n  ${blue}ai -d <conversation_id_start>-<conversation_id_end>${default}"
         echo -e "${dim}Delete all conversations:${default}\n  ${blue}rm \"${CONVERSATIONS_FILENAME}\"${default}"
-        echo -e "${dim}Manage models:${default}\n  ${blue}ai -m list${default}\n  ${blue}ai -m add <model_name> <endpoint> <api_key> [default]${default}\n  ${blue}ai -m delete <model_name>${default}\n  ${blue}ai -m setdefault <model_name>${default}"
         exit 0
         ;;
       "c")
@@ -854,9 +992,10 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
         break
         ;;
       "m")
+        # user wants to manage models or select a specific model for the current session
         shift
         ManageModels "$@"
-        exit 0
+        shift
         ;;
       *)
         if [ "$OPTERR" = 1 ] && [ -t 0 ]; then
@@ -897,7 +1036,8 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
     SwitchConversation "$conversation_id"
   elif [ "$IMAGE_GENERATION_MODE" = false ]; then
     # we're not in image generation mode
-    SetCurrentModel
+    # if the user has not passed a model name, set the default model
+    [[ -z "$CURRENT_MODEL" ]] && SetCurrentModel
     if [ ! -t 0 ]; then
       # we have input from stdin (script was invoked through a pipe)
       PIPED_SCRIPT=true
@@ -905,9 +1045,9 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
         # shellcheck disable=SC2124
         userinput="$@"
       fi
-      # parse the input passed and treat the stdin input (sanitized into a safe JSON string) as "attachment" data
-      # resulting $userinput will be "<script arguments> \n <stdin data>"
-      userinput=$(jq -Rs --arg userinput "$userinput" '$userinput + "\n" + .')
+      # parse the input passed and treat the stdin input (sanitized into a safe JSON string and formatted as a markdown code block) as "attachment" data
+      # resulting $userinput will be "<script arguments> \n ```\n<stdin data>\n```"
+      userinput=$(jq -Rs --arg userinput "$userinput" '$userinput + "\n```\n" + . + "\n```"')
     else
       # no stdin
       # trim trailing newline from userinput and make a JSON string
@@ -930,6 +1070,7 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
       if [ -n "$total_tokens" ] && [ "$total_tokens" != "null" ]; then
         echo -e "${dim}[total tokens used: $total_tokens]${default}\n"      
       fi
+      # TODO: save the model information to the conversation history **FOR EACH MESSAGE**, so that the conversation can be replayed accurately for each message
       if [ "$PIPED_SCRIPT" = true ]; then
         conversation_history=$(jq -c ". += $userinput" <<<"$conversation_history")
         conversation_history=$(jq -c ". += [$response_message]" <<<"$conversation_history")
@@ -945,7 +1086,7 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
         conversation_messages=2
         UpdateConversationTopic
       else
-        # one shot Q&A, ask the user if they want to continue the conversation
+        # single turn Q&A, ask the user if they want to continue the conversation
         # or timeout after 3 seconds and quit without saving the conversation
         if read -r -s -t 5 -n 1 -p "${blue}Press any key within ${redbg} 5 ${default}${blue} seconds to continue this conversation...${default}"; then
           tput cub "$(tput cols)"
@@ -971,7 +1112,6 @@ else
   SetCurrentModel
 fi
 
-stty -echoctl && trap Ctrl_C INT
 if [ "$IMAGE_GENERATION_MODE" = true ]; then
   GenerateImage
   exit 0
@@ -988,7 +1128,7 @@ while true; do
   userinput=""
   SHOW_CONVMENU=false
   SHOW_MODELMENU=false
-  ChatBubble "YOU" "${greenbg}" "${green}" "null" "(conversation topic: ${CONVERSATION_TOPIC}, model: ${CURRENT_MODEL})"
+  ChatBubble "YOU" "${greenbg}" "${green}" "null" "${CURRENT_MODEL}" "${CONVERSATION_TOPIC}"
   while true; do
     read -erp "» " inputline
     if [ "$inputline" = "?" ]; then
@@ -1017,7 +1157,7 @@ while true; do
     ShowConversationsMenu
     ShowCommandsRecap
   elif [ "$SHOW_MODELMENU" = true ]; then
-    ShowModelMenu
+    ManageModels
     ShowCommandsRecap
   else
     # escape user input to create a JSON string, safe to pass on
@@ -1034,7 +1174,7 @@ while true; do
     fi
     response_text=$(jq -r '.content' <<<"$response_message")
     total_tokens=$(jq -r '.total_tokens' <<<"$response_message")
-    ChatBubble "$CURRENT_MODEL" "${lightgreybg}" "${white}" "$total_tokens"
+    ChatBubble "$CURRENT_MODEL" "${lightgreybg}" "${white}" "$total_tokens" "$CURRENT_MODEL"
     MarkdownEcho "$response_text"
   fi
 done
