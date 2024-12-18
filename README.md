@@ -46,13 +46,17 @@
 
 ## Full command line options (`ai -h`):
 
+###### Manage models (add/delete/set default):
+
+  `ai -m`
+
 ###### Start a new interactive conversation:
 
-`ai`
+`ai [-m <modelname>]`
 
 ###### Single turn Q&A (will ask you to continue interacting, otherwise quit after answer):
 
-`ai "how many planets are there in the solar system?"`
+`ai [-m <modelname>] "how many planets are there in the solar system?"`
 
 ###### Generate one or more images (default 1, max 10):
 
@@ -60,7 +64,7 @@
 
 ###### Submit data as part of the question:
 
-`cat file.txt | ai can you summarize the contents of this file?`
+`cat file.txt | ai [-m <modelname>] can you summarize the contents of this file?`
 
 ###### List saved conversations:
 
@@ -84,29 +88,17 @@
 
 ###### Delete all conversations:
 
-`rm "$HOME/conversations.json"`
-
-###### Manage models:
-
-  `ai -m list`
-
-  `ai -m add` *(opens the model adding wizard, which includes various presets)*
-  
-  `ai -m add <model_name> <endpoint> <api_key> [default]`
-
-  `ai -m delete <model_name>`
-
-  `ai -m setdefault <model_name>`
+`rm "$HOME/.config/ai-bash/conversations.json"`
 
 ## Usage examples:
 
 ##### (Adding a model)
 
-![image](https://github.com/user-attachments/assets/ae38f968-b1bc-402b-99cd-1a8680d92ab7)
+![image](https://github.com/user-attachments/assets/ac9c7c32-bfd7-4c1b-83e0-5413f2133efe)
 
 ##### (Listing added models)
 
-![image](https://github.com/user-attachments/assets/6fcca44c-5b87-4204-8b2a-56aedfafad61)
+![image](https://github.com/user-attachments/assets/73751569-978a-4670-bf94-3c4e0cf7e6d8)
 
 ##### (Interaction and conversation resuming)
 
