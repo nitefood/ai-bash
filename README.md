@@ -94,11 +94,11 @@
 
 ##### (Adding a model)
 
-![image](https://github.com/user-attachments/assets/ac9c7c32-bfd7-4c1b-83e0-5413f2133efe)
+![image](https://github.com/user-attachments/assets/acd404d6-1766-4764-a590-bceb04bb3696)
 
 ##### (Listing added models)
 
-![image](https://github.com/user-attachments/assets/73751569-978a-4670-bf94-3c4e0cf7e6d8)
+![image](https://github.com/user-attachments/assets/feace719-0308-4e6a-8a03-f1f21d941378)
 
 ##### (Interaction and conversation resuming)
 
