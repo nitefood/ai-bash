@@ -15,7 +15,7 @@
 
 # TODO: customizable system prompting (to "prime" the assistant)
 # TODO: temperature setting and presets
-AI_VERSION="1.0-beta+2"
+AI_VERSION="1.0-beta+3"
 
 # Color scheme
 green=$'\e[38;5;035m'
@@ -24,6 +24,7 @@ white=$'\e[38;5;007m'
 blue=$'\e[38;5;038m'
 red=$'\e[38;5;203m'
 black=$'\e[38;5;016m'
+magenta=$'\e[38;5;161m'
 lightgreybg=$'\e[48;5;252m'${black}
 bluebg=$'\e[48;5;038m'${black}
 redbg=$'\e[48;5;210m'${black}
@@ -139,13 +140,19 @@ SendChat() {
     # DBG: save API call output to logfile
     # echo -e "\n_____\nRequest: $input\nResponse: $response_json\n_____" >>"${WORKING_DIR}/ai.log"
     ai_output=$(jq -c '.choices[0].message' <<<"$response_json")
-    total_tokens=$(jq -r '.usage.total_tokens' <<<"$response_json")
+    total_tokens=$(jq -r '.usage.totalTokens' <<<"$response_json")
   
     if [ "$ai_output" = "null" ]; then
       StatusbarMessage
-      error_type=$(jq -r '.error.type' <<<"$response_json")
-      error_code=$(jq -r '.error.code' <<<"$response_json")
-      error_msg=$(jq -r '.error.message' <<<"$response_json")
+      error_type=$(jq -r '.error.type' <<<"$response_json" 2>/dev/null)
+      error_code=$(jq -r '.error.code' <<<"$response_json" 2>/dev/null)
+      error_msg=$(jq -r '.error.message' <<<"$response_json" 2>/dev/null)
+      if [ -z "$error_code" ]; then
+        error_type="-"
+        error_code="-"
+        # try fetching the 'error' key from the output (e.g. HF API)
+        error_msg=$(jq -r '.error' <<<"$response_json" 2>/dev/null)
+      fi
       echo -e "\n${red}- API ERROR -${default}" >&2
       echo -e "${redbg} TYPE ${default} $error_type" >&2
       echo -e "${redbg} CODE ${default} $error_code" >&2
@@ -504,10 +511,10 @@ DrawModelMenu() {
   # get terminal width to decide wether to show the full menu or just the model names and the default checkmark
   SHOW_COMPACT_MENU=false
   termwidth=$(tput cols)
-  if [ "$termwidth" -gt 167 ]; then
+  if [ "$termwidth" -gt 88 ]; then
     # show full menu
-    printf "   %-40s %-100s %-10s %-1s\n" "Model Name" "Endpoint" "API Key" "Is Default?"
-    printf "   %-40s %-100s %-10s %-1s\n" "----------" "--------" "-------" "-----------"
+    printf "   %-40s %-20s %-10s %-1s\n" "Model Name" "Provider" "API Key" "Is Default?"
+    printf "   %-40s %-20s %-10s %-1s\n" "----------" "--------" "-------" "-----------"
   else
     # show compact menu, only arrow, model name and Is Default? columns
     SHOW_COMPACT_MENU=true
@@ -518,6 +525,7 @@ DrawModelMenu() {
   while IFS= read -r model_name; do
     is_default=$(jq -r --arg model_name "$model_name" '.[$model_name].default' <<<"$config_content")
     endpoint=$(jq -r --arg model_name "$model_name" '.[$model_name].endpoint' <<<"$config_content")
+    provider=$(jq -r --arg model_name "$model_name" '.[$model_name].provider' <<<"$config_content")
     api_key=$(jq -r --arg model_name "$model_name" '.[$model_name].api_key' <<<"$config_content")
     # if CURRENT_MODEL is not set, use CURSOR_POS to set the arrow
     # otherwise match the model name with CURRENT_MODEL and set the arrow accordingly
@@ -535,16 +543,16 @@ DrawModelMenu() {
       arrow=" "
     fi
     if [ "$is_default" = true ]; then
-      modelname_bgcolor="${greenbg}"
+      default_model_color="${green}"
       default_checkmark="✓"
     else
-      modelname_bgcolor="${default}"
+      default_model_color="${default}"
       default_checkmark=""
     fi
     if [ "$SHOW_COMPACT_MENU" = true ]; then
-      printf " ${arrow} ${modelname_bgcolor}%-40s${default} ${green}%8s${default}\n" "$model_name" "${default_checkmark}"
+      printf " ${arrow} ${default_model_color}%-40s${default} ${green}%8s${default}\n" "$model_name" "${default_checkmark}"
     else
-      printf " ${arrow} ${modelname_bgcolor}%-40s${default} %-100s %-10s${default} ${green}%8s${default}\n" "$model_name" "$endpoint" "${api_key:0:5}***" "${default_checkmark}"
+      printf " ${arrow} ${default_model_color}%-40s${default} %-20s %-10s${default} ${green}%8s${default}\n" "$model_name" "$provider" "${api_key:0:5}***" "${default_checkmark}"
     fi
     ((i++))
   done < <(jq -r 'keys[]' <<<"$config_content")
@@ -676,9 +684,10 @@ AddNewModel() {
   local forcedefault="$1"
   local provider=""
   echo -e "\n${dim}Select the provider to list currently available models:${default}\n"
-  echo -e "1) ${yellow}OpenAI ${dim}(GPT4o, o1, etc.)${default}"
+  echo -e "1) ${magenta}OpenAI ${dim}(GPT4o, o1, etc.)${default}"
   echo -e "2) ${blue}Google ${dim}(Gemini, Learn LM, etc.)${default}"
-  echo -e "3) ${green}Custom ${dim}(e.g. Ollama/LM Studio/llama.cpp)${default}"
+  echo -e "3) ${yellow}HuggingFace ${dim}(lists the 50 top trending models on HF)${default}"
+  echo -e "4) ${green}Custom ${dim}(e.g. Ollama/LM Studio/llama.cpp)${default}"
   echo
 
   read -rp "Enter your choice: " provider_choice
@@ -694,7 +703,12 @@ AddNewModel() {
       endpoint="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
       ;;
     3)
-      provider="custom"
+      provider="HuggingFace"
+      model_list_endpoint="https://huggingface.co/api/models?other=conversational&filter=text-generation&inference=warm"
+      endpoint="https://api-inference.huggingface.co/v1/chat/completions"
+      ;;
+    4)
+      provider="Custom"
       read -rp "Enter API endpoint ${underline}BASE URL${default} ${dim}- e.g. http://127.0.0.1:11434 (Ollama) or http://127.0.0.1:1234 (LM Studio)${default}: " endpoint
       model_list_endpoint="${endpoint}/v1/models"
       endpoint="${endpoint}/v1/chat/completions"
@@ -704,40 +718,53 @@ AddNewModel() {
       exit 1
       ;;
   esac
-  
-  # Prompt for API key, display asterisks for each character entered
-  api_key=""
-  exec < /dev/tty # Ensure input comes from terminal
-  stty -echo # Disable terminal echo
-  echo -n "Enter your $provider API Key (press ENTER to skip): "
-  while IFS= read -r -n1 char; do
-    [[ -z "$char" ]] && { echo; break; } # Exit on Enter key
-    [[ "$char" == $'\177' ]] && # Handle backspace 
-      [[ ${#api_key} -gt 0 ]] && {
-        api_key=${api_key%?}
-        echo -en "\b \b"
-      } && continue
-    api_key+="$char"
-    echo -n "*"
-  done
-  stty echo # Restore terminal echo
-  [[ -z "$api_key" ]] && api_key="XXX"
 
+  # Check if the provider's API key is already in the config file
+  lowercase_provider=$(tr '[:upper:]' '[:lower:]' <<<"$provider")
+  api_key=$(jq -r --arg provider "$lowercase_provider" '.api_keys[$provider] | select(. != null)' "$CONFIG_FILENAME")
+  # Prompt for API key if not found, display asterisks for each character entered
+  if [ -z "$api_key" ]; then
+    exec < /dev/tty # Ensure input comes from terminal
+    stty -echo # Disable terminal echo
+    echo -n "Enter your $provider API Key (press ENTER to skip): "
+    while IFS= read -r -n1 char; do
+      [[ -z "$char" ]] && { echo; break; } # Exit on Enter key
+      [[ "$char" == $'\177' ]] && # Handle backspace 
+        [[ ${#api_key} -gt 0 ]] && {
+          api_key=${api_key%?}
+          echo -en "\b \b"
+        } && continue
+      api_key+="$char"
+      echo -n "*"
+    done
+    stty echo # Restore terminal echo
+    # save the API key in the config file, unless it's empty
+    if [ -n "$api_key" ]; then
+      jq --arg provider "$lowercase_provider" --arg api_key "$api_key" '.api_keys[$provider] = $api_key' "$CONFIG_FILENAME" >temp.json && mv temp.json "$CONFIG_FILENAME"
+    else
+      # if it was empty, set it to "XXX" to pass a fake key (e.g. when using a local/custom provider) and don't save it
+      api_key="XXX"
+    fi
+  fi
   echo
   StatusbarMessage "Fetching available models for $provider"
   # Get list of available models
   case "$provider" in
     "OpenAI")
       model_list=$(curl -s "${model_list_endpoint}" -H "Authorization: Bearer ${api_key}" | jq -r '.data[].id' 2>/dev/null)
-      model_display_color="${yellow}"
+      model_display_color="${magenta}"
       ;;
-    "custom")
+    "Custom")
       model_list=$(curl -s "${model_list_endpoint}" -H "Authorization: Bearer ${api_key}" | jq -r '.data[].id' 2>/dev/null)
       model_display_color="${green}"
       ;;
     "Google")
       model_list=$(curl -s "${model_list_endpoint}?key=${api_key}" | jq -r '.models[].name | split("/") | last' 2>/dev/null)
       model_display_color="${blue}"
+      ;;
+    "HuggingFace")
+      model_list=$(curl -s "${model_list_endpoint}" -H "Authorization: Bearer ${api_key}" | jq -r '.[] | select(.trendingScore > 10) | .id' | head -n 40 2>/dev/null)
+      model_display_color="${yellow}"
       ;;
   esac
 
@@ -781,8 +808,9 @@ AddNewModel() {
   jq --arg model_name "$model_name" \
     --arg endpoint "$endpoint" \
     --arg api_key "$api_key" \
+    --arg provider "$provider" \
     --argjson default "$default_value" \
-    '.models += {($model_name): {endpoint: $endpoint, api_key: $api_key, default: $default}}' "$CONFIG_FILENAME" >temp.json && mv temp.json "$CONFIG_FILENAME"
+    '.models += {($model_name): {provider: $provider, endpoint: $endpoint, api_key: $api_key, default: $default}}' "$CONFIG_FILENAME" >temp.json && mv temp.json "$CONFIG_FILENAME"
 
   echo -e "${greenbg} SUCCESS ${default} Model ${green}$model_name${default} added successfully."
   if [ "$default_value" = true ]; then
@@ -791,29 +819,29 @@ AddNewModel() {
 }
 
 InitializeConfig() {
+  empty_config_template='{"models": {}, "api_keys": {}}'
   # Create config directory if it doesn't exist
   mkdir -p "$WORKING_DIR"
   # Check if config file exists
   if [ ! -f "$CONFIG_FILENAME" ]; then
+    echo -e "\n${yellowbg} Configuration file not found ${default}"
     # Create a new config file, with an empty models block
-    echo -e "{}" > "$CONFIG_FILENAME"
+    echo -e "$empty_config_template" > "$CONFIG_FILENAME"
     echo -e "${bluebg} INFO ${default} Configuration file created at ${blue}\"$CONFIG_FILENAME\"${default}"
     # open the configuration wizard
-    echo -e "\n${yellowbg} Configuration file not found ${default}"
     echo -e "${yellow}Please add at least one model to continue.${default}"
     AddNewModel true # add a new model, and set it as default
   fi
   # Check if the config file is valid JSON
   if ! jq empty "$CONFIG_FILENAME" >/dev/null 2>&1; then
     echo -e "${redbg} ERROR ${default} Invalid JSON in configuration file: ${red}\"$CONFIG_FILENAME\", recreating it${default}"
-    echo -e "{}" > "$CONFIG_FILENAME"
+    echo -e "$empty_config_template" > "$CONFIG_FILENAME"
     AddNewModel true # add a new model, and set it as default
   fi
-  # Check if 'models' key exists in the config file
-  if ! jq -e '.models' "$CONFIG_FILENAME" >/dev/null 2>&1; then
-    # echo -e "${redbg} ERROR ${default} Missing 'models' key in configuration file: ${red}\"$CONFIG_FILENAME\"${default}"
-    # the config file is corrupted, delete it and recreate it
-    echo -e "{}" > "$CONFIG_FILENAME"
+  # Check if the 'models' and 'api_keys' keys exist in the config file
+  if ! jq -e '.models' "$CONFIG_FILENAME" >/dev/null 2>&1 || ! jq -e '.api_keys' "$CONFIG_FILENAME" >/dev/null 2>&1; then
+    # the config file is corrupted, recreate it
+    echo -e "$empty_config_template" > "$CONFIG_FILENAME"
     AddNewModel true # add a new model, and set it as default
   fi
 }
@@ -1117,7 +1145,9 @@ else
   # script was called without parameters, setup a new conversation
   INTERACTIVE_CONVERSATION=true
   conversation_messages=0
-  SetCurrentModel
+  if ! SetCurrentModel; then
+    AddNewModel true
+  fi
 fi
 
 if [ "$IMAGE_GENERATION_MODE" = true ]; then
