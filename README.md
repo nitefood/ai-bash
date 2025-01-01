@@ -2,7 +2,7 @@
 
 ## Features:
 
-* **Supports any OpenAI-compatible API endpoint, both local and remote** *e.g. OpenAI, Gemini, LM Studio, Ollama, and more*
+* **Supports any OpenAI-compatible API endpoint, both local and remote** *e.g. OpenAI, Gemini, Grok, LM Studio, Ollama, and more*
 
 * **Interactive chat sessions**
 
@@ -11,11 +11,8 @@
 * **Image generation support:** *(currently limited to DALL·E 2)*
   
   * image preview grid rendered directly in the terminal
-  
   * generate up to 10 images at a time
-  
   * automatic URL shortening
-  
   * optionally save images and prompt to local disk
 
 * **Markdown support for replies** (requires [glow](https://github.com/charmbracelet/glow#installation))
@@ -27,15 +24,10 @@
 * **Full conversation support**:
   
   * locally store unlimited conversations (in JSON format)
-  
   * quick resume last conversation
-  
   * delete/resume any stored conversation
-  
   * conversation messages replay on resume
-  
   * store current and start new conversation (reset history) during interactive sessions
-  
   * Automatic conversation topic identification and update
 
 * **Multiple chat models support**:

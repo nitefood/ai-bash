@@ -15,7 +15,7 @@
 
 # TODO: customizable system prompting (to "prime" the assistant)
 # TODO: temperature setting and presets
-AI_VERSION="1.0-beta+3"
+AI_VERSION="1.0-beta+4"
 
 # Color scheme
 green=$'\e[38;5;035m'
@@ -687,7 +687,8 @@ AddNewModel() {
   echo -e "1) ${magenta}OpenAI ${dim}(GPT4o, o1, etc.)${default}"
   echo -e "2) ${blue}Google ${dim}(Gemini, Learn LM, etc.)${default}"
   echo -e "3) ${yellow}HuggingFace ${dim}(lists the 50 top trending models on HF)${default}"
-  echo -e "4) ${green}Custom ${dim}(e.g. Ollama/LM Studio/llama.cpp)${default}"
+  echo -e "4) ${red}xAI ${dim}(Grok)${default}"
+  echo -e "5) ${green}Custom ${dim}(e.g. Ollama/LM Studio/llama.cpp)${default}"
   echo
 
   read -rp "Enter your choice: " provider_choice
@@ -708,6 +709,11 @@ AddNewModel() {
       endpoint="https://api-inference.huggingface.co/v1/chat/completions"
       ;;
     4)
+      provider="xAI"
+      model_list_endpoint="https://api.x.ai/v1/models"
+      endpoint="https://api.x.ai/v1/chat/completions"
+      ;;
+    5)
       provider="Custom"
       read -rp "Enter API endpoint ${underline}BASE URL${default} ${dim}- e.g. http://127.0.0.1:11434 (Ollama) or http://127.0.0.1:1234 (LM Studio)${default}: " endpoint
       model_list_endpoint="${endpoint}/v1/models"
@@ -765,6 +771,10 @@ AddNewModel() {
     "HuggingFace")
       model_list=$(curl -s "${model_list_endpoint}" -H "Authorization: Bearer ${api_key}" | jq -r '.[] | select(.trendingScore > 10) | .id' | head -n 40 2>/dev/null)
       model_display_color="${yellow}"
+      ;;
+    "xAI")
+      model_list=$(curl -s "${model_list_endpoint}" -H "Authorization: Bearer ${api_key}" | jq -r '.data[].id' 2>/dev/null)
+      model_display_color="${red}"
       ;;
   esac
 
