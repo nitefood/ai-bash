@@ -140,7 +140,12 @@ SendChat() {
     # DBG: save API call output to logfile
     # echo -e "\n_____\nRequest: $input\nResponse: $response_json\n_____" >>"${WORKING_DIR}/ai.log"
     ai_output=$(jq -c '.choices[0].message' <<<"$response_json")
+    # fetch total conversation token count from the response JSON
     total_tokens=$(jq -r '.usage.totalTokens' <<<"$response_json")
+    if [ "$total_tokens" = "null" ]; then
+      # handle xAI API responses where the "totalTokens" key is called "total_tokens"
+      total_tokens=$(jq -r '.usage.total_tokens' <<<"$response_json")
+    fi
   
     if [ "$ai_output" = "null" ]; then
       StatusbarMessage
