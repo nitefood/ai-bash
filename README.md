@@ -2,7 +2,16 @@
 
 ## Features:
 
-* **Supports any OpenAI-compatible API endpoint, both local and remote** *e.g. OpenAI, Gemini, Grok, LM Studio, Ollama, and more*
+* **Supports any OpenAI-compatible API endpoint, both local and remote**
+
+  * _[OpenAI](https://platform.openai.com/docs/)_
+  * _[Gemini](https://aistudio.google.com/)_
+  * _[Grok](https://x.ai/api)_
+  * _[HuggingFace](https://huggingface.co/docs/api-inference/index)_
+  * _[OpenRouter](https://openrouter.ai/docs/quick-start)_
+  * _[LM Studio](https://lmstudio.ai/docs/api/openai-api)_
+  * _[Ollama](https://ollama.com/blog/openai-compatibility)_
+  * _and many more_
 
 * **Interactive chat sessions**
 
@@ -10,10 +19,10 @@
 
 * **Image generation support:** *(currently limited to DALL·E 2)*
   
-  * image preview grid rendered directly in the terminal
-  * generate up to 10 images at a time
-  * automatic URL shortening
-  * optionally save images and prompt to local disk
+  * _image preview grid rendered directly in the terminal_
+  * _generate up to 10 images at a time_
+  * _automatic URL shortening_
+  * _optionally save images and prompt to local disk_
 
 * **Markdown support for replies** (requires [glow](https://github.com/charmbracelet/glow#installation))
 
@@ -23,18 +32,18 @@
 
 * **Full conversation support**:
   
-  * locally store unlimited conversations (in JSON format)
-  * quick resume last conversation
-  * delete/resume any stored conversation
-  * conversation messages replay on resume
-  * store current and start new conversation (reset history) during interactive sessions
-  * Automatic conversation topic identification and update
+  * _locally store unlimited conversations (in JSON format)_
+  * _quick resume last conversation_
+  * _delete/resume any stored conversation_
+  * _conversation messages replay on resume_
+  * _store current and start new conversation (reset history) during interactive sessions_
+  * _Automatic conversation topic identification and update_
 
 * **Multiple chat models support**:
 
-  * switch to a different model mid-conversation
-  * can freely combine local (open source) and remote (closed) models
-  * a single tool to query any model served through an OpenAI-compatible API endpoint
+  * _switch to a different model mid-conversation_
+  * _can freely combine local and remote models_
+  * _a single tool to query any model served through an OpenAI-compatible API endpoint_
 
 ## Full command line options (`ai -h`):
 

@@ -15,7 +15,7 @@
 
 # TODO: customizable system prompting (to "prime" the assistant)
 # TODO: temperature setting and presets
-AI_VERSION="1.0-beta+4"
+AI_VERSION="1.0-beta+5"
 
 # Color scheme
 green=$'\e[38;5;035m'
@@ -44,7 +44,7 @@ CONVERSATIONS_FILENAME="conversations.json" # Stored conversations file
 TMP_CONVERSATIONS_FILENAME=".${CONVERSATIONS_FILENAME}.tmp" # swap conversation filename
 CONVERSATION_TOPIC="\"new conversation\"" # Default name for a new conversation
 CONVERSATION_BUFFER_LEN=0 # Conversation buffer length (number of messages the AI will try to remember) - default: 0 (unlimited and handled on server side)
-RETRY_WAIT_TIME=3 # Retry wait time in case of server error
+RETRY_WAIT_TIME=10 # Retry wait time in case of server error
 IMAGE_GENERATION_MODE=false
 IMAGES_TO_GENERATE=1
 CONFIG_FILENAME="${WORKING_DIR}/${CONFIG_FILENAME}"
@@ -157,6 +157,12 @@ SendChat() {
         error_code="-"
         # try fetching the 'error' key from the output (e.g. HF API)
         error_msg=$(jq -r '.error' <<<"$response_json" 2>/dev/null)
+      fi
+      # check if the metadata field exists (OpenRouter API)
+      if [ -n "$(jq -r '.error.metadata' <<<"$response_json")" ]; then
+        openrouter_provider=$(jq -r '.error.metadata.provider_name' <<<"$response_json")
+        raw_error=$(jq -r '.error.metadata.raw' <<<"$response_json")
+        error_msg+=". Raw reply from provider (${yellow}${openrouter_provider}${default}): ${red}${dim}$raw_error${default}"
       fi
       echo -e "\n${red}- API ERROR -${default}" >&2
       echo -e "${redbg} TYPE ${default} $error_type" >&2
@@ -688,12 +694,14 @@ AddNewModel() {
   # $1 = force default model (true/false)
   local forcedefault="$1"
   local provider=""
+  local api_key=""
   echo -e "\n${dim}Select the provider to list currently available models:${default}\n"
   echo -e "1) ${magenta}OpenAI ${dim}(GPT4o, o1, etc.)${default}"
   echo -e "2) ${blue}Google ${dim}(Gemini, Learn LM, etc.)${default}"
-  echo -e "3) ${yellow}HuggingFace ${dim}(lists the 50 top trending models on HF)${default}"
+  echo -e "3) ${yellow}HuggingFace ${dim}(lists the top trending models on HF)${default}"
   echo -e "4) ${red}xAI ${dim}(Grok)${default}"
-  echo -e "5) ${green}Custom ${dim}(e.g. Ollama/LM Studio/llama.cpp)${default}"
+  echo -e "5) ${white}OpenRouter ${dim}(https://openrouter.ai/models)${default}"
+  echo -e "6) ${green}Custom ${dim}(e.g. Ollama/LM Studio/llama.cpp)${default}"
   echo
 
   read -rp "Enter your choice: " provider_choice
@@ -719,10 +727,15 @@ AddNewModel() {
       endpoint="https://api.x.ai/v1/chat/completions"
       ;;
     5)
+      provider="OpenRouter"
+      model_list_endpoint="https://openrouter.ai/api/v1/models"
+      endpoint="https://openrouter.ai/api/v1/chat/completions"
+      ;;
+    6)
       provider="Custom"
-      read -rp "Enter API endpoint ${underline}BASE URL${default} ${dim}- e.g. http://127.0.0.1:11434 (Ollama) or http://127.0.0.1:1234 (LM Studio)${default}: " endpoint
-      model_list_endpoint="${endpoint}/v1/models"
-      endpoint="${endpoint}/v1/chat/completions"
+      read -rp "Enter API endpoint ${underline}BASE URL${default} ${dim}- e.g. http://127.0.0.1:11434/v1 (Ollama) or http://127.0.0.1:1234/v1 (LM Studio)${default}: " endpoint
+      model_list_endpoint="${endpoint}/models"
+      endpoint="${endpoint}/chat/completions"
       ;;
     *)
       echo -e "${red}Invalid choice. Exiting.${default}"
@@ -730,9 +743,11 @@ AddNewModel() {
       ;;
   esac
 
-  # Check if the provider's API key is already in the config file
-  lowercase_provider=$(tr '[:upper:]' '[:lower:]' <<<"$provider")
-  api_key=$(jq -r --arg provider "$lowercase_provider" '.api_keys[$provider] | select(. != null)' "$CONFIG_FILENAME")
+  # Check if the provider's API key is already in the config file, unless it's a custom provider (in which case, always ask for a key)
+  if [ "$provider" != "Custom" ]; then
+    lowercase_provider=$(tr '[:upper:]' '[:lower:]' <<<"$provider")
+    api_key=$(jq -r --arg provider "$lowercase_provider" '.api_keys[$provider] | select(. != null)' "$CONFIG_FILENAME")
+  fi
   # Prompt for API key if not found, display asterisks for each character entered
   if [ -z "$api_key" ]; then
     exec < /dev/tty # Ensure input comes from terminal
@@ -749,8 +764,8 @@ AddNewModel() {
       echo -n "*"
     done
     stty echo # Restore terminal echo
-    # save the API key in the config file, unless it's empty
-    if [ -n "$api_key" ]; then
+    # save the API key in the config file, unless it's empty (or for a custom provider)
+    if [ -n "$api_key" ] && [ "$provider" != "Custom" ]; then
       jq --arg provider "$lowercase_provider" --arg api_key "$api_key" '.api_keys[$provider] = $api_key' "$CONFIG_FILENAME" >temp.json && mv temp.json "$CONFIG_FILENAME"
     else
       # if it was empty, set it to "XXX" to pass a fake key (e.g. when using a local/custom provider) and don't save it
@@ -762,24 +777,28 @@ AddNewModel() {
   # Get list of available models
   case "$provider" in
     "OpenAI")
-      model_list=$(curl -s "${model_list_endpoint}" -H "Authorization: Bearer ${api_key}" | jq -r '.data[].id' 2>/dev/null)
+      model_list=$(curl -s "${model_list_endpoint}" -H "Authorization: Bearer ${api_key}" | jq -r '.data[].id' 2>/dev/null | sort)
       model_display_color="${magenta}"
       ;;
     "Custom")
-      model_list=$(curl -s "${model_list_endpoint}" -H "Authorization: Bearer ${api_key}" | jq -r '.data[].id' 2>/dev/null)
+      model_list=$(curl -s "${model_list_endpoint}" -H "Authorization: Bearer ${api_key}" | jq -r '.data[].id' 2>/dev/null | sort)
       model_display_color="${green}"
       ;;
     "Google")
-      model_list=$(curl -s "${model_list_endpoint}?key=${api_key}" | jq -r '.models[].name | split("/") | last' 2>/dev/null)
+      model_list=$(curl -s "${model_list_endpoint}?key=${api_key}" | jq -r '.models[].name | split("/") | last' 2>/dev/null | sort)
       model_display_color="${blue}"
       ;;
     "HuggingFace")
-      model_list=$(curl -s "${model_list_endpoint}" -H "Authorization: Bearer ${api_key}" | jq -r '.[] | select(.trendingScore > 10) | .id' | head -n 40 2>/dev/null)
+      model_list=$(curl -s "${model_list_endpoint}" -H "Authorization: Bearer ${api_key}" | jq -r '.[] | select(.trendingScore > 0) | .id' 2>/dev/null | head -n 50 | sort)
       model_display_color="${yellow}"
       ;;
     "xAI")
-      model_list=$(curl -s "${model_list_endpoint}" -H "Authorization: Bearer ${api_key}" | jq -r '.data[].id' 2>/dev/null)
+      model_list=$(curl -s "${model_list_endpoint}" -H "Authorization: Bearer ${api_key}" | jq -r '.data[].id' 2>/dev/null | sort)
       model_display_color="${red}"
+      ;;
+    "OpenRouter")
+      model_list=$(curl -s "${model_list_endpoint}" -H "Authorization: Bearer ${api_key}" | jq -r '.data[].id' 2>/dev/null | sort)
+      model_display_color="${white}"
       ;;
   esac
 
