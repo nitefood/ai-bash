@@ -240,6 +240,13 @@ SendChat() {
   else
     input=$(jq '.' <<<"$@")
   fi
+  # Prepend system prompt (if any) as the first message
+  if [ -n "$CURRENT_SYSTEMPROMPT" ] && [ -f "$SYSTEMPROMPTS_FILENAME" ]; then
+    system_content=$(jq -r --arg name "$CURRENT_SYSTEMPROMPT" '.systemprompts[] | select(.name == $name) | .content' "$SYSTEMPROMPTS_FILENAME")
+    if [ -n "$system_content" ] && [ "$system_content" != "null" ]; then
+      input=$(jq --arg content "$system_content" '[{"role":"system","content":$content}] + .' <<<"$input")
+    fi
+  fi
   local model_endpoint api_key
   model_endpoint=$(jq -r ".models.\"$CURRENT_MODEL\".endpoint" "$CONFIG_FILENAME")
   api_key=$(jq -r ".models.\"$CURRENT_MODEL\".api_key" "$CONFIG_FILENAME")
