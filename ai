@@ -15,7 +15,7 @@
 
 # TODO: customizable system prompting (to "prime" the assistant)
 # TODO: temperature setting and presets
-AI_VERSION="1.0-beta+5"
+AI_VERSION="1.0.0-beta+6"
 
 # Color scheme
 green=$'\e[38;5;035m'
@@ -42,6 +42,7 @@ WORKING_DIR="${HOME}/.config/ai-bash"
 CONFIG_FILENAME="config.json" # Configuration file
 CONVERSATIONS_FILENAME="conversations.json" # Stored conversations file
 TMP_CONVERSATIONS_FILENAME=".${CONVERSATIONS_FILENAME}.tmp" # swap conversation filename
+SYSTEMPROMPTS_FILENAME="systemprompts.json"
 CONVERSATION_TOPIC="\"new conversation\"" # Default name for a new conversation
 CONVERSATION_BUFFER_LEN=0 # Conversation buffer length (number of messages the AI will try to remember) - default: 0 (unlimited and handled on server side)
 RETRY_WAIT_TIME=10 # Retry wait time in case of server error
@@ -50,6 +51,8 @@ IMAGES_TO_GENERATE=1
 CONFIG_FILENAME="${WORKING_DIR}/${CONFIG_FILENAME}"
 CONVERSATIONS_FILENAME="${WORKING_DIR}/${CONVERSATIONS_FILENAME}"
 TMP_CONVERSATIONS_FILENAME="${WORKING_DIR}/${TMP_CONVERSATIONS_FILENAME}"
+SYSTEMPROMPTS_FILENAME="${WORKING_DIR}/${SYSTEMPROMPTS_FILENAME}"
+CURRENT_SYSTEMPROMPT=""
 CURRENT_MODEL=""
 CURSOR_POS=1
 
@@ -74,7 +77,7 @@ StatusbarMessage() { # invoke without parameters to delete the status bar messag
 }
 
 ShowCommandsRecap() {
-  echo -en "\n${dim}${green}Enter an empty line to send your query, ${default}${green}?${dim} to view previous conversations or ${default}${green}!${dim} to change model\n${default}${green}"
+  echo -en "\n${dim}${green}Enter an empty line to send your query, ${default}${green}?${dim} to view previous conversations, ${default}${green}!${dim} to change model or ${default}${green}*${dim} to manage system prompts\n${default}${green}"
 }
 
 ChatBubble() {
@@ -97,10 +100,16 @@ ChatBubble() {
     tokencount_text=""
   fi
 
+  # Append system prompt name to model name if set
+  local model_display="$model_name"
+  if [ -n "$CURRENT_SYSTEMPROMPT" ]; then
+    model_display+=" ${bluebg} SYS: $CURRENT_SYSTEMPROMPT ${default}${green}"
+  fi
+
   conversation_topic_colorsstripped=""
   if [ -n "${conversation_topic}" ]; then
     conversation_topic=" ${dim}[Topic: ${default}${bubblecolor}${conversation_topic}${dim}"
-    [[ "$speaker" != "$model_name" ]] && conversation_topic+=", Model: ${default}${bubblecolor}${model_name}${dim}"
+    [[ "$speaker" != "$model_name" ]] && conversation_topic+="\, Model: ${default}${bubblecolor}${model_display}${dim}"
     conversation_topic+="]"
     # strip colors from $conversation_topic for bubble border length calculation
     conversation_topic_colorsstripped=$(sed -r 's/\x1B\[[0-9;]*[JKmsu]//g' <<<"$conversation_topic")
@@ -115,6 +124,112 @@ ChatBubble() {
   printf '╰'
   printf '%.s─' $(seq 1 $(( output_len + 2 )) )
   printf '╯\n'
+}
+#############################
+# System Prompt Management   #
+#############################
+
+# Ensure system prompts file exists and is valid
+InitializeSystemPrompts() {
+  mkdir -p "$WORKING_DIR"
+  if [ ! -f "$SYSTEMPROMPTS_FILENAME" ]; then
+    echo '{"systemprompts":[]}' > "$SYSTEMPROMPTS_FILENAME"
+  fi
+  if ! jq empty "$SYSTEMPROMPTS_FILENAME" >/dev/null 2>&1; then
+    echo '{"systemprompts":[]}' > "$SYSTEMPROMPTS_FILENAME"
+  fi
+}
+
+# List, create, edit, delete, and select system prompts
+ManageSystemPrompts() {
+  InitializeSystemPrompts
+  while true; do
+    tput clear
+    echo -e "\n${lightgreybg}System Prompts:${default}\n"
+    local prompts_count i prompt_name prompt_content
+    # prompts_json=$(jq -c '.systemprompts' "$SYSTEMPROMPTS_FILENAME")
+    prompts_count=$(jq '.systemprompts | length' "$SYSTEMPROMPTS_FILENAME")
+    echo "  0) [no system prompt]"
+    for ((i=0; i<prompts_count; i++)); do
+      prompt_name=$(jq -r ".systemprompts[$i].name" "$SYSTEMPROMPTS_FILENAME")
+      prompt_content=$(jq -r ".systemprompts[$i].content" "$SYSTEMPROMPTS_FILENAME")
+      printf " %2d) %-10s  %s\n" "$((i+1))" "$prompt_name" "${dim}${prompt_content:0:40}${default}"
+    done
+    echo -e "\n${dim}Use arrow keys or enter a number to select."
+    echo "a: add  e: edit  d: delete  q: quit${default}"
+    read -erp "» " sysmenuinput
+    case "$sysmenuinput" in
+      0)
+        CURRENT_SYSTEMPROMPT=""
+        break
+        ;;
+      a|A)
+        # Add new system prompt
+        read -erp "Enter prompt name (max 10 chars, unique): " newname
+        if [ -z "$newname" ] || [ ${#newname} -gt 10 ]; then
+          echo "Name must be 1-10 characters."
+          sleep 2
+          continue
+        fi
+        # Check uniqueness
+        if jq -e --arg name "$newname" '.systemprompts[] | select(.name == $name)' "$SYSTEMPROMPTS_FILENAME" >/dev/null; then
+          echo "Name already exists."
+          sleep 2
+          continue
+        fi
+        read -erp "Enter prompt content: " newcontent
+        jq --arg name "$newname" --arg content "$newcontent" '.systemprompts += [{name: $name, content: $content}]' "$SYSTEMPROMPTS_FILENAME" > temp.json && mv temp.json "$SYSTEMPROMPTS_FILENAME"
+        ;;
+      e|E)
+        read -erp "Enter number to edit: " editnum
+        if ! [[ "$editnum" =~ ^[0-9]+$ ]] || [ "$editnum" -lt 1 ] || [ "$editnum" -gt "$prompts_count" ]; then
+          echo "Invalid selection."
+          sleep 2
+          continue
+        fi
+        idx=$((editnum-1))
+        oldname=$(jq -r ".systemprompts[$idx].name" "$SYSTEMPROMPTS_FILENAME")
+        oldcontent=$(jq -r ".systemprompts[$idx].content" "$SYSTEMPROMPTS_FILENAME")
+        read -erp "Edit name (max 10 chars, unique) [$oldname]: " newname
+        [ -z "$newname" ] && newname="$oldname"
+        if [ ${#newname} -gt 10 ]; then
+          echo "Name must be 1-10 characters."
+          sleep 2
+          continue
+        fi
+        # Check uniqueness (allow unchanged)
+        if [ "$newname" != "$oldname" ] && jq -e --arg name "$newname" '.systemprompts[] | select(.name == $name)' "$SYSTEMPROMPTS_FILENAME" >/dev/null; then
+          echo "Name already exists."
+          sleep 2
+          continue
+        fi
+        read -erp "Edit content: " newcontent
+        [ -z "$newcontent" ] && newcontent="$oldcontent"
+        jq --argjson idx "$idx" --arg name "$newname" --arg content "$newcontent" '(.systemprompts[$idx]) |= {name: $name, content: $content}' "$SYSTEMPROMPTS_FILENAME" > temp.json && mv temp.json "$SYSTEMPROMPTS_FILENAME"
+        ;;
+      d|D)
+        read -erp "Enter number to delete: " delnum
+        if ! [[ "$delnum" =~ ^[0-9]+$ ]] || [ "$delnum" -lt 1 ] || [ "$delnum" -gt "$prompts_count" ]; then
+          echo "Invalid selection."
+          sleep 2
+          continue
+        fi
+        idx=$((delnum-1))
+        jq --argjson idx "$idx" 'del(.systemprompts[$idx])' "$SYSTEMPROMPTS_FILENAME" > temp.json && mv temp.json "$SYSTEMPROMPTS_FILENAME"
+        ;;
+      q|Q)
+        break
+        ;;
+      *)
+        # Select system prompt
+        if [[ "$sysmenuinput" =~ ^[0-9]+$ ]] && [ "$sysmenuinput" -ge 1 ] && [ "$sysmenuinput" -le "$prompts_count" ]; then
+          idx=$((sysmenuinput-1))
+          CURRENT_SYSTEMPROMPT=$(jq -r ".systemprompts[$idx].name" "$SYSTEMPROMPTS_FILENAME")
+          break
+        fi
+        ;;
+    esac
+  done
 }
 
 SendChat() {
@@ -908,6 +1023,28 @@ CoreutilsFixup() {
 	fi
 }
 
+GetFullParamsFromCurrentPosition() {
+  #
+  # Helper function that retrieves all the command line
+  # parameters starting from position $OPTIND (current
+  # option's argument as being parsed by getopts)
+  #
+  # 1) first param is set to current option's param (space-separated)
+  # 2) then append (if any exist) the following command line params.
+  #
+  # this allows for invocations such as 'ai -i SENTENCE WITH SPACES'
+  # without having to quote SENTENCE WITH SPACES
+  # The function requires passing the original $@ as parameter
+  # so as to not confuse it with the function's own $@.
+  #
+  # in the above example, $OPTARG="SENTENCE", $OPTIND="3", ${@:$OPTIND}=array("WITH" "SPACES")
+  #
+  userinput="$OPTARG"
+  for option in "${@:$OPTIND}"; do
+    userinput+=" $option"
+  done
+}
+
 #*
 #* Main script start
 #*
@@ -940,28 +1077,6 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
     # ':' -> missing mandatory parameter to the option
     optspec=":hcd:lim"
     while getopts "$optspec" optchar; do {
-      GetFullParamsFromCurrentPosition() {
-        #
-        # Helper function that retrieves all the command line
-        # parameters starting from position $OPTIND (current
-        # option's argument as being parsed by getopts)
-        #
-        # 1) first param is set to current option's param (space-separated)
-        # 2) then append (if any exist) the following command line params.
-        #
-        # this allows for invocations such as 'ai -i SENTENCE WITH SPACES'
-        # without having to quote SENTENCE WITH SPACES
-        # The function requires passing the original $@ as parameter
-        # so as to not confuse it with the function's own $@.
-        #
-        # in the above example, $OPTARG="SENTENCE", $OPTIND="3", ${@:$OPTIND}=array("WITH" "SPACES")
-        #
-        userinput="$OPTARG"
-        for option in "${@:$OPTIND}"; do
-          userinput+=" $option"
-        done
-      }
-
       case "${optchar}" in
       "h")
         # display usage help
@@ -1200,6 +1315,7 @@ while true; do
   userinput=""
   SHOW_CONVMENU=false
   SHOW_MODELMENU=false
+  SHOW_SYSPROMPTMENU=false
   ChatBubble "YOU" "${greenbg}" "${green}" "null" "${CURRENT_MODEL}" "${CONVERSATION_TOPIC}"
   while true; do
     read -erp "» " inputline
@@ -1208,6 +1324,9 @@ while true; do
       break
     elif [ "$inputline" = "!" ]; then
       SHOW_MODELMENU=true
+      break
+    elif [ "$inputline" = "*" ]; then
+      SHOW_SYSPROMPTMENU=true
       break
     fi
     if [ -z "$inputline" ]; then
@@ -1230,6 +1349,9 @@ while true; do
     ShowCommandsRecap
   elif [ "$SHOW_MODELMENU" = true ]; then
     ManageModels
+    ShowCommandsRecap
+  elif [ "$SHOW_SYSPROMPTMENU" = true ]; then
+    ManageSystemPrompts
     ShowCommandsRecap
   else
     # escape user input to create a JSON string, safe to pass on
