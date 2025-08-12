@@ -14,7 +14,7 @@
 # ╰──────────────────────────────────────────────────────────────────────────────────────╯
 
 # TODO: temperature setting and presets
-AI_VERSION="1.0.0-beta+6"
+AI_VERSION="1.0.0-beta+7"
 
 # Color scheme
 green=$'\e[38;5;035m'
@@ -137,6 +137,25 @@ InitializeSystemPrompts() {
   fi
   if ! jq empty "$SYSTEMPROMPTS_FILENAME" >/dev/null 2>&1; then
     echo '{"systemprompts":[]}' > "$SYSTEMPROMPTS_FILENAME"
+  fi
+}
+
+# Set CURRENT_SYSTEMPROMPT by name (or clear when empty). Returns 0 on success, 1 on failure
+SetCurrentSystemPrompt() {
+  InitializeSystemPrompts
+  local name="$1"
+  if [ -z "$name" ]; then
+    CURRENT_SYSTEMPROMPT=""
+    echo -e "\n${blue}${dim}[System prompt cleared]${default}"
+    return 0
+  fi
+  if jq -e --arg name "$name" '.systemprompts[] | select(.name == $name)' "$SYSTEMPROMPTS_FILENAME" >/dev/null; then
+    CURRENT_SYSTEMPROMPT="$name"
+    echo -e "\n${blue}${dim}[System prompt set to ${default}${blue}${CURRENT_SYSTEMPROMPT}${dim}]${default}"
+    return 0
+  else
+    echo -e "${yellowbg} WARNING ${default}${yellow}${dim} System prompt ${default}${yellow}\"$name\"${dim} not found.${default}"
+    return 1
   fi
 }
 
@@ -264,6 +283,19 @@ ManageSystemPrompts() {
         ;;
     esac
   done
+}
+
+# Handle -s flag: open menu when no name is provided; otherwise set by name
+ManageSystemPromptOption() {
+  # $1 = optional system prompt name
+  local maybe_name="$1"
+  if [ -z "$maybe_name" ] || [[ "$maybe_name" == -* ]]; then
+    ManageSystemPrompts
+  else
+  SetCurrentSystemPrompt "$maybe_name" || return 1
+  # consume the provided name from the main positional params
+  shift
+  fi
 }
 
 SendChat() {
@@ -1133,7 +1165,7 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
     # in this mode, getopts sets optchar to:
     # '?' -> unknown option
     # ':' -> missing mandatory parameter to the option
-    optspec=":hcd:lim"
+    optspec=":hcd:lims"
     while getopts "$optspec" optchar; do {
       case "${optchar}" in
       "h")
@@ -1141,6 +1173,7 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
         echo -e "\n${bold}ai-bash v${AI_VERSION} Usage:${default}\n"
         echo -e "${dim}Show this help:${default}\n  ${blue}ai -h${default}"
         echo -e "${dim}Manage models (add/delete/set default):${default}\n  ${blue}ai -m${default}"
+        echo -e "${dim}Manage/select system prompts:${default}\n  ${blue}ai -s${default} or ${blue}ai -s <name>${default}"
         echo -e "${dim}Start a new interactive conversation:${default}\n  ${blue}ai [-m <modelname>]${default}"
         echo -e "${dim}Single turn Q&A:${default}\n  ${blue}ai [-m <modelname>] \"how many planets are there in the solar system?\"${default}"
         echo -e "${dim}Generate one or more images (default: 1):${default}\n  ${blue}ai -i [num] \"a cute cat\"${default}"
@@ -1153,6 +1186,17 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
         echo -e "${dim}Delete all conversations:${default}\n  ${blue}rm \"${CONVERSATIONS_FILENAME}\"${default}"
         exit 0
         ;;
+      "s")
+        # user wants to manage/select system prompt for the current session
+        # Optional-arg pattern: if next token is not another option, take it as the name
+        next_arg="${!OPTIND}"
+        if [ -n "$next_arg" ] && [[ "$next_arg" != -* ]]; then
+          ManageSystemPromptOption "$next_arg" || exit 1
+          OPTIND=$((OPTIND+1))
+        else
+          ManageSystemPromptOption || exit 0
+        fi
+        ;;
       "c")
         # user wants to continue a conversation
         INTERACTIVE_CONVERSATION=true
@@ -1162,11 +1206,10 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
         break
         ;;
       "d")
-        # user wants to delete a previous conversation
-        GetFullParamsFromCurrentPosition "$@"
         DELETE_CONVERSATION=true
         CONVERSATION_ID_TO_DELETE_UPTO=""
         ParseConversationsFile
+        GetFullParamsFromCurrentPosition "$@"
         CONVERSATION_ID_TO_DELETE=${userinput//[^0-9\-]/} # remove all non-digits (excluding dash) (e.g. the user passed "-d3" instead of "-d 3")
         if [ -z "${CONVERSATION_ID_TO_DELETE##*-*}" ]; then
           # user wants to delete a range of conversations
@@ -1284,6 +1327,7 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
     # we're not in image generation mode
     # if the user has not passed a model name, set the default model
     [[ -z "$CURRENT_MODEL" ]] && SetCurrentModel
+    # -s flag is already handled above, so CURRENT_SYSTEMPROMPT is set if needed
     if [ ! -t 0 ]; then
       # we have input from stdin (script was invoked through a pipe)
       PIPED_SCRIPT=true
