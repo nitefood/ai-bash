@@ -13,7 +13,6 @@
 # │ (Launch the script with the -h parameter or visit the project's homepage)            │
 # ╰──────────────────────────────────────────────────────────────────────────────────────╯
 
-# TODO: customizable system prompting (to "prime" the assistant)
 # TODO: temperature setting and presets
 AI_VERSION="1.0.0-beta+6"
 
