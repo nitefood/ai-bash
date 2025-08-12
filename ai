@@ -54,6 +54,7 @@ SYSTEMPROMPTS_FILENAME="${WORKING_DIR}/${SYSTEMPROMPTS_FILENAME}"
 CURRENT_SYSTEMPROMPT=""
 CURRENT_MODEL=""
 CURSOR_POS=1
+SYSPROMPT_OVERRIDE=false
 
 StatusbarMessage() { # invoke without parameters to delete the status bar message
   if [ -n "$statusbar_message" ]; then
@@ -147,11 +148,13 @@ SetCurrentSystemPrompt() {
   if [ -z "$name" ]; then
     CURRENT_SYSTEMPROMPT=""
     echo -e "\n${blue}${dim}[System prompt cleared]${default}"
+  SYSPROMPT_OVERRIDE=true
     return 0
   fi
   if jq -e --arg name "$name" '.systemprompts[] | select(.name == $name)' "$SYSTEMPROMPTS_FILENAME" >/dev/null; then
     CURRENT_SYSTEMPROMPT="$name"
     echo -e "\n${blue}${dim}[System prompt set to ${default}${blue}${CURRENT_SYSTEMPROMPT}${dim}]${default}"
+  SYSPROMPT_OVERRIDE=true
     return 0
   else
     echo -e "${yellowbg} WARNING ${default}${yellow}${dim} System prompt ${default}${yellow}\"$name\"${dim} not found.${default}"
@@ -174,23 +177,35 @@ MultiLineInput() {
 # List, create, edit, delete, and select system prompts
 ManageSystemPrompts() {
   InitializeSystemPrompts
+  # Load current default from config (may be empty)
+  local default_sp
+  default_sp=$(jq -r '.default_system_prompt // ""' "$CONFIG_FILENAME" 2>/dev/null)
   while true; do
     tput clear
     echo -e "\n${lightgreybg}System Prompts:${default}\n"
-    local prompts_count i prompt_name prompt_content
+    local prompts_count i prompt_name prompt_content is_default name_color checkmark
     prompts_count=$(jq '.systemprompts | length' "$SYSTEMPROMPTS_FILENAME")
-    echo "  ${white}0) [none]${default}"
+    # Show option 0 ([none]), indicate if it's default
+    if [ -z "$default_sp" ]; then
+      echo "  ${green}0) [none] ✓${default}"
+    else
+      echo "  ${white}0) [none]${default}"
+    fi
     for ((i=0; i<prompts_count; i++)); do
       prompt_name=$(jq -r ".systemprompts[$i].name" "$SYSTEMPROMPTS_FILENAME")
       prompt_content=$(jq -r ".systemprompts[$i].content" "$SYSTEMPROMPTS_FILENAME")
       # Wrap prompt_content to fit terminal width, indent after name
+      is_default=false; checkmark=""; name_color="${blue}"
+      if [ "$prompt_name" = "$default_sp" ]; then
+        is_default=true; checkmark=" ✓"; name_color="${green}"
+      fi
       name_field=$(printf "%-20s" "$prompt_name")
-      prefix=" $(printf "%2d) ${blue}%s${default}  " "$((i+1))" "$name_field")"
+      prefix=" $(printf "%2d) %s%s${default}%s  " "$((i+1))" "$name_color" "$name_field" "$checkmark")"
       prefix_len=${#prefix}
       wrap_width=$((terminal_width - prefix_len))
       # Use fold to wrap; count lines; indent lines 2..; truncate to first 10 lines and add placeholder if longer
       # shellcheck disable=SC2183
-      indent=$(printf '%*s' "$(( prefix_len - 15 ))") # subtract 15 to account for color codes
+      indent=$(printf '%*s' "$(( prefix_len - 15 ))") # subtract ~color code width
       wrapped=$(echo -e "$prompt_content" | fold -s -w $wrap_width)
       line_count=$(echo -e "$wrapped" | wc -l)
       wrapped_indented=$(echo -e "$wrapped" | sed "2,\$s/^/$indent/")
@@ -201,11 +216,12 @@ ManageSystemPrompts() {
       fi
     done
     echo -e "\n${dim}Enter a number to select a system prompt."
-    echo "${default}a${dim}: add  ${default}e${dim}: edit  ${default}d${dim}: delete  ${default}q${dim}: quit${default}"
+    echo "${default}a${dim}: add  ${default}e${dim}: edit  ${default}d${dim}: delete  ${default}s${dim}: set default  ${default}q${dim}: quit${default}"
     read -erp "» " sysmenuinput
     case "$sysmenuinput" in
       0)
         CURRENT_SYSTEMPROMPT=""
+        SYSPROMPT_OVERRIDE=true
         break
         ;;
       a|A)
@@ -259,6 +275,11 @@ ManageSystemPrompts() {
         # If user provided empty content explicitly in editor/EOF, keep old content
         [ -z "$newcontent" ] && newcontent="$oldcontent"
         jq --argjson idx "$idx" --arg name "$newname" --arg content "$newcontent" '(.systemprompts[$idx]) |= {name: $name, content: $content}' "$SYSTEMPROMPTS_FILENAME" > temp.json && mv temp.json "$SYSTEMPROMPTS_FILENAME"
+        # If default system prompt name changed, update config
+        if [ -n "$default_sp" ] && [ "$oldname" = "$default_sp" ] && [ "$newname" != "$oldname" ]; then
+          jq --arg name "$newname" '.default_system_prompt = $name' "$CONFIG_FILENAME" > temp.json && mv temp.json "$CONFIG_FILENAME"
+          default_sp="$newname"
+        fi
         ;;
       d|D)
         read -erp "Enter number to delete: " delnum
@@ -268,7 +289,34 @@ ManageSystemPrompts() {
           continue
         fi
         idx=$((delnum-1))
+        delname=$(jq -r ".systemprompts[$idx].name" "$SYSTEMPROMPTS_FILENAME")
         jq --argjson idx "$idx" 'del(.systemprompts[$idx])' "$SYSTEMPROMPTS_FILENAME" > temp.json && mv temp.json "$SYSTEMPROMPTS_FILENAME"
+        # If we deleted the default prompt, clear default
+        if [ -n "$default_sp" ] && [ "$delname" = "$default_sp" ]; then
+          jq '.default_system_prompt = null' "$CONFIG_FILENAME" > temp.json && mv temp.json "$CONFIG_FILENAME"
+          default_sp=""
+          echo -e "${yellowbg} WARNING ${default} Default system prompt deleted. Default set to [none]."
+        fi
+        ;;
+      s|S)
+        # Set default prompt
+        read -erp "Enter number to set default (0 for none): " defnum
+        if ! [[ "$defnum" =~ ^[0-9]+$ ]] || [ "$defnum" -lt 0 ] || [ "$defnum" -gt "$prompts_count" ]; then
+          echo "Invalid selection."
+          sleep 2
+          continue
+        fi
+        if [ "$defnum" -eq 0 ]; then
+          jq '.default_system_prompt = null' "$CONFIG_FILENAME" > temp.json && mv temp.json "$CONFIG_FILENAME"
+          default_sp=""
+          echo -e "${greenbg} SUCCESS ${default} Default system prompt set to [none]."
+        else
+          idx=$((defnum-1))
+          newdef=$(jq -r ".systemprompts[$idx].name" "$SYSTEMPROMPTS_FILENAME")
+          jq --arg name "$newdef" '.default_system_prompt = $name' "$CONFIG_FILENAME" > temp.json && mv temp.json "$CONFIG_FILENAME"
+          default_sp="$newdef"
+          echo -e "${greenbg} SUCCESS ${default} Default system prompt set to ${green}$newdef${default}."
+        fi
         ;;
       q|Q)
         break
@@ -278,6 +326,7 @@ ManageSystemPrompts() {
         if [[ "$sysmenuinput" =~ ^[0-9]+$ ]] && [ "$sysmenuinput" -ge 1 ] && [ "$sysmenuinput" -le "$prompts_count" ]; then
           idx=$((sysmenuinput-1))
           CURRENT_SYSTEMPROMPT=$(jq -r ".systemprompts[$idx].name" "$SYSTEMPROMPTS_FILENAME")
+          SYSPROMPT_OVERRIDE=true
           break
         fi
         ;;
@@ -1192,9 +1241,10 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
         next_arg="${!OPTIND}"
         if [ -n "$next_arg" ] && [[ "$next_arg" != -* ]]; then
           ManageSystemPromptOption "$next_arg" || exit 1
-          OPTIND=$((OPTIND+1))
+          shift 2
         else
-          ManageSystemPromptOption || exit 0
+          ManageSystemPromptOption || exit 1
+          shift
         fi
         ;;
       "c")
@@ -1328,6 +1378,13 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
     # if the user has not passed a model name, set the default model
     [[ -z "$CURRENT_MODEL" ]] && SetCurrentModel
     # -s flag is already handled above, so CURRENT_SYSTEMPROMPT is set if needed
+    # If not overridden, load default system prompt from config (if any)
+    if [ "$SYSPROMPT_OVERRIDE" = false ]; then
+      default_sp=$(jq -r '.default_system_prompt // ""' "$CONFIG_FILENAME" 2>/dev/null)
+      if [ -n "$default_sp" ] && [ "$default_sp" != "null" ]; then
+        CURRENT_SYSTEMPROMPT="$default_sp"
+      fi
+    fi
     if [ ! -t 0 ]; then
       # we have input from stdin (script was invoked through a pipe)
       PIPED_SCRIPT=true
@@ -1401,6 +1458,13 @@ else
   conversation_messages=0
   if ! SetCurrentModel; then
     AddNewModel true
+  fi
+  # Load default system prompt if set and no override provided
+  if [ "$SYSPROMPT_OVERRIDE" = false ]; then
+    default_sp=$(jq -r '.default_system_prompt // ""' "$CONFIG_FILENAME" 2>/dev/null)
+    if [ -n "$default_sp" ] && [ "$default_sp" != "null" ]; then
+      CURRENT_SYSTEMPROMPT="$default_sp"
+    fi
   fi
 fi
 
