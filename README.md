@@ -45,6 +45,10 @@
   * _can freely combine local and remote models_
   * _a single tool to query any model served through an OpenAI-compatible API endpoint_
 
+* **Multiple system prompt support**:
+
+  * _manage multiple system prompts to alter the base model behavior and persona_
+
 ## Full command line options (`ai -h`):
 
 ###### Manage models (add/delete/set default):

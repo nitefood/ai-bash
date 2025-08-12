@@ -124,8 +124,9 @@ ChatBubble() {
   printf '%.s─' $(seq 1 $(( output_len + 2 )) )
   printf '╯\n'
 }
+
 #############################
-# System Prompt Management   #
+# System Prompt Management  #
 #############################
 
 # Ensure system prompts file exists and is valid
