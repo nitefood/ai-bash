@@ -178,157 +178,174 @@ MultiLineInput() {
 ManageSystemPrompts() {
   InitializeSystemPrompts
   # Load current default from config (may be empty)
-  local default_sp
   default_sp=$(jq -r '.default_system_prompt // ""' "$CONFIG_FILENAME" 2>/dev/null)
-  while true; do
-    tput clear
-    echo -e "\n${lightgreybg}System Prompts:${default}\n"
-    local prompts_count i prompt_name prompt_content is_default name_color checkmark
-    prompts_count=$(jq '.systemprompts | length' "$SYSTEMPROMPTS_FILENAME")
-    # Show option 0 ([none]), indicate if it's default
-    if [ -z "$default_sp" ]; then
-      echo "  ${green}0) [none] ✓${default}"
-    else
-      echo "  ${white}0) [none]${default}"
+  # Count prompts and include a [none] option at the top
+  prompt_count=$(jq -r '.systemprompts | length' "$SYSTEMPROMPTS_FILENAME")
+  total_items=$((prompt_count + 1))
+  # Initialize cursor on current selection (if any), else on [none]
+  CURSOR_POS=1
+  if [ -n "$CURRENT_SYSTEMPROMPT" ]; then
+    idx=$(jq -r --arg name "$CURRENT_SYSTEMPROMPT" '.systemprompts | map(.name) | index($name)' "$SYSTEMPROMPTS_FILENAME")
+    if [ "$idx" != "null" ] && [ -n "$idx" ]; then
+      CURSOR_POS=$((idx + 2))
     fi
-    for ((i=0; i<prompts_count; i++)); do
-      prompt_name=$(jq -r ".systemprompts[$i].name" "$SYSTEMPROMPTS_FILENAME")
-      prompt_content=$(jq -r ".systemprompts[$i].content" "$SYSTEMPROMPTS_FILENAME")
-      # Wrap prompt_content to fit terminal width, indent after name
-      is_default=false; checkmark=""; name_color="${blue}"
-      if [ "$prompt_name" = "$default_sp" ]; then
-        is_default=true; checkmark=" ✓"; name_color="${green}"
-      fi
-      name_field=$(printf "%-20s" "$prompt_name")
-      prefix=" $(printf "%2d) %s%s${default}%s  " "$((i+1))" "$name_color" "$name_field" "$checkmark")"
-      prefix_len=${#prefix}
-      wrap_width=$((terminal_width - prefix_len))
-      # Use fold to wrap; count lines; indent lines 2..; truncate to first 10 lines and add placeholder if longer
-      # shellcheck disable=SC2183
-      indent=$(printf '%*s' "$(( prefix_len - 15 ))") # subtract ~color code width
-      wrapped=$(echo -e "$prompt_content" | fold -s -w $wrap_width)
-      line_count=$(echo -e "$wrapped" | wc -l)
-      wrapped_indented=$(echo -e "$wrapped" | sed "2,\$s/^/$indent/")
-      truncated=$(echo -e "$wrapped_indented" | head -n 10)
-      printf "%s%s\n" "$prefix" "${dim}${truncated}${default}"
-      if [ "$line_count" -gt 10 ]; then
-        printf "%s%s\n" "$indent" "${dim}[...]${default}"
-      fi
-    done
-    echo -e "\n${dim}Enter a number to select a system prompt."
-    echo "${default}a${dim}: add  ${default}e${dim}: edit  ${default}d${dim}: delete  ${default}s${dim}: set default  ${default}q${dim}: quit${default}"
-    read -erp "» " sysmenuinput
-    case "$sysmenuinput" in
-      0)
-        CURRENT_SYSTEMPROMPT=""
-        SYSPROMPT_OVERRIDE=true
+  fi
+
+  # Create a trap to handle window resizing
+  trap 'tput clear; DrawSystemPromptMenu "$total_items" true' WINCH
+
+  # Initial draw
+  DrawSystemPromptMenu "$total_items" true
+
+  # Handle key input
+  while true; do
+    read -rsn1 key
+    case "$key" in
+      $'\x1B')  # ESC sequence
+        read -rsn1 -t 0.1 key
+        if [ "$key" = "[" ]; then
+          read -rsn1 -t 0.1 key
+          case "$key" in
+            "A")  # Up arrow
+              ((CURSOR_POS--))
+              [ $CURSOR_POS -lt 1 ] && CURSOR_POS="$total_items"
+              DrawSystemPromptMenu "$total_items" false
+              ;;
+            "B")  # Down arrow
+              ((CURSOR_POS++))
+              [ "$CURSOR_POS" -gt "$total_items" ] && CURSOR_POS=1
+              DrawSystemPromptMenu "$total_items" false
+              ;;
+          esac
+        fi
+        ;;
+      "")  # Enter key, Select prompt
+        tput cnorm # show cursor
+        if [ "$CURSOR_POS" -eq 1 ]; then
+          SetCurrentSystemPrompt ""
+        else
+          idx=$((CURSOR_POS-2))
+          selname=$(jq -r ".systemprompts[$idx].name" "$SYSTEMPROMPTS_FILENAME")
+          SetCurrentSystemPrompt "$selname"
+        fi
         break
         ;;
-      a|A)
-        # Add new system prompt
+      "a"|"A")  # Add prompt
+        tput cnorm # show cursor
         read -erp "Enter prompt name (max 20 chars, unique): " newname
         if [ -z "$newname" ] || [ ${#newname} -gt 20 ]; then
           echo "Name must be 1-20 characters."
-          sleep 2
+          sleep 1
+          DrawSystemPromptMenu "$total_items" true
           continue
         fi
-        # Check uniqueness
         if jq -e --arg name "$newname" '.systemprompts[] | select(.name == $name)' "$SYSTEMPROMPTS_FILENAME" >/dev/null; then
           echo "Name already exists."
-          sleep 2
+          sleep 1
+          DrawSystemPromptMenu "$total_items" true
           continue
         fi
         newcontent="$(MultiLineInput 'Enter prompt content (press Ctrl-D when done):')"
         if [ -z "$newcontent" ]; then
           echo "Content cannot be empty."
-          sleep 2
+          sleep 1
+          DrawSystemPromptMenu "$total_items" true
           continue
         fi
         jq --arg name "$newname" --arg content "$newcontent" '.systemprompts += [{name: $name, content: $content}]' "$SYSTEMPROMPTS_FILENAME" > temp.json && mv temp.json "$SYSTEMPROMPTS_FILENAME"
+        echo -e "${greenbg} SUCCESS ${default} System prompt ${green}$newname${default} added successfully."
+        sleep 1s
+        # Recompute counts and redraw
+        prompt_count=$(jq -r '.systemprompts | length' "$SYSTEMPROMPTS_FILENAME")
+        total_items=$((prompt_count + 1))
+        CURSOR_POS=$total_items
+        DrawSystemPromptMenu "$total_items" true
         ;;
-      e|E)
-        read -erp "Enter number to edit: " editnum
-        if ! [[ "$editnum" =~ ^[0-9]+$ ]] || [ "$editnum" -lt 1 ] || [ "$editnum" -gt "$prompts_count" ]; then
-          echo "Invalid selection."
-          sleep 2
+      "e"|"E")  # Edit selected prompt
+        tput cnorm # show cursor
+        if [ "$CURSOR_POS" -eq 1 ]; then
+          echo "Select a prompt to edit."
+          sleep 1
+          DrawSystemPromptMenu "$total_items" true
           continue
         fi
-        idx=$((editnum-1))
+        idx=$((CURSOR_POS-2))
         oldname=$(jq -r ".systemprompts[$idx].name" "$SYSTEMPROMPTS_FILENAME")
         oldcontent=$(jq -r ".systemprompts[$idx].content" "$SYSTEMPROMPTS_FILENAME")
         read -erp "Edit name (max 20 chars, unique) [${blue}$oldname${default}]: " newname
         [ -z "$newname" ] && newname="$oldname"
         if [ ${#newname} -gt 20 ]; then
           echo "Name must be 1-20 characters."
-          sleep 2
+          sleep 1
+          DrawSystemPromptMenu "$total_items" true
           continue
         fi
-        # Check uniqueness (allow unchanged)
         if [ "$newname" != "$oldname" ] && jq -e --arg name "$newname" '.systemprompts[] | select(.name == $name)' "$SYSTEMPROMPTS_FILENAME" >/dev/null; then
           echo "Name already exists."
-          sleep 2
+          sleep 1
+          DrawSystemPromptMenu "$total_items" true
           continue
         fi
-        # Show current prompt to the user (sent to stderr so it won't be captured)
         echo -e "\nCurrent prompt:\n${dim}${oldcontent}${default}\n" >&2
         newcontent="$(MultiLineInput 'Edit prompt content (press Ctrl-D when done). Leave empty to keep current:')"
-        # If user provided empty content explicitly in editor/EOF, keep old content
         [ -z "$newcontent" ] && newcontent="$oldcontent"
         jq --argjson idx "$idx" --arg name "$newname" --arg content "$newcontent" '(.systemprompts[$idx]) |= {name: $name, content: $content}' "$SYSTEMPROMPTS_FILENAME" > temp.json && mv temp.json "$SYSTEMPROMPTS_FILENAME"
         # If default system prompt name changed, update config
+        default_sp=$(jq -r '.default_system_prompt // ""' "$CONFIG_FILENAME" 2>/dev/null)
         if [ -n "$default_sp" ] && [ "$oldname" = "$default_sp" ] && [ "$newname" != "$oldname" ]; then
           jq --arg name "$newname" '.default_system_prompt = $name' "$CONFIG_FILENAME" > temp.json && mv temp.json "$CONFIG_FILENAME"
           default_sp="$newname"
         fi
+  echo -e "${greenbg} SUCCESS ${default} System prompt ${green}$newname${default} updated successfully."
+  sleep 1s
+        DrawSystemPromptMenu "$total_items" true
         ;;
-      d|D)
-        read -erp "Enter number to delete: " delnum
-        if ! [[ "$delnum" =~ ^[0-9]+$ ]] || [ "$delnum" -lt 1 ] || [ "$delnum" -gt "$prompts_count" ]; then
-          echo "Invalid selection."
-          sleep 2
+      "d"|"D")  # Delete selected prompt
+        tput cnorm # show cursor
+        if [ "$CURSOR_POS" -eq 1 ]; then
+          echo "Select a prompt to delete."
+          sleep 1
+          DrawSystemPromptMenu "$total_items" true
           continue
         fi
-        idx=$((delnum-1))
+        idx=$((CURSOR_POS-2))
         delname=$(jq -r ".systemprompts[$idx].name" "$SYSTEMPROMPTS_FILENAME")
-        jq --argjson idx "$idx" 'del(.systemprompts[$idx])' "$SYSTEMPROMPTS_FILENAME" > temp.json && mv temp.json "$SYSTEMPROMPTS_FILENAME"
-        # If we deleted the default prompt, clear default
-        if [ -n "$default_sp" ] && [ "$delname" = "$default_sp" ]; then
-          jq '.default_system_prompt = null' "$CONFIG_FILENAME" > temp.json && mv temp.json "$CONFIG_FILENAME"
-          default_sp=""
-          echo -e "${yellowbg} WARNING ${default} Default system prompt deleted. Default set to [none]."
+        # Prompt confirmation like model menu
+        echo -en "\n${yellowbg} WARNING ${default} Are you sure you want to delete system prompt ${yellow}$delname${default}? [y/N]: "
+        read -r confirm_delete
+        if [[ "$confirm_delete" =~ ^[Yy]$ ]]; then
+          jq --argjson idx "$idx" 'del(.systemprompts[$idx])' "$SYSTEMPROMPTS_FILENAME" > temp.json && mv temp.json "$SYSTEMPROMPTS_FILENAME"
+          # If we deleted the default prompt, clear default
+          default_sp=$(jq -r '.default_system_prompt // ""' "$CONFIG_FILENAME" 2>/dev/null)
+          if [ -n "$default_sp" ] && [ "$delname" = "$default_sp" ]; then
+            jq '.default_system_prompt = null' "$CONFIG_FILENAME" > temp.json && mv temp.json "$CONFIG_FILENAME"
+            echo -e "${yellowbg} WARNING ${default} Default system prompt deleted. Default set to [none]."
+          fi
+          echo -e "${greenbg} SUCCESS ${default} System prompt ${green}$delname${default} deleted successfully."
+          sleep 1s
+          # Refresh counts and UI
+          prompt_count=$(jq -r '.systemprompts | length' "$SYSTEMPROMPTS_FILENAME")
+          total_items=$((prompt_count + 1))
+          CURSOR_POS=1
         fi
+        DrawSystemPromptMenu "$total_items" true
         ;;
-      s|S)
-        # Set default prompt
-        read -erp "Enter number to set default (0 for none): " defnum
-        if ! [[ "$defnum" =~ ^[0-9]+$ ]] || [ "$defnum" -lt 0 ] || [ "$defnum" -gt "$prompts_count" ]; then
-          echo "Invalid selection."
-          sleep 2
-          continue
-        fi
-        if [ "$defnum" -eq 0 ]; then
+      "s"|"S")  # Set default
+        if [ "$CURSOR_POS" -eq 1 ]; then
           jq '.default_system_prompt = null' "$CONFIG_FILENAME" > temp.json && mv temp.json "$CONFIG_FILENAME"
-          default_sp=""
           echo -e "${greenbg} SUCCESS ${default} Default system prompt set to [none]."
         else
-          idx=$((defnum-1))
+          idx=$((CURSOR_POS-2))
           newdef=$(jq -r ".systemprompts[$idx].name" "$SYSTEMPROMPTS_FILENAME")
           jq --arg name "$newdef" '.default_system_prompt = $name' "$CONFIG_FILENAME" > temp.json && mv temp.json "$CONFIG_FILENAME"
-          default_sp="$newdef"
           echo -e "${greenbg} SUCCESS ${default} Default system prompt set to ${green}$newdef${default}."
         fi
+        sleep 1s
+        DrawSystemPromptMenu "$total_items" true
         ;;
-      q|Q)
+      "q"|"Q")  # Quit menu
+        tput cnorm # show cursor
         break
-        ;;
-      *)
-        # Select system prompt
-        if [[ "$sysmenuinput" =~ ^[0-9]+$ ]] && [ "$sysmenuinput" -ge 1 ] && [ "$sysmenuinput" -le "$prompts_count" ]; then
-          idx=$((sysmenuinput-1))
-          CURRENT_SYSTEMPROMPT=$(jq -r ".systemprompts[$idx].name" "$SYSTEMPROMPTS_FILENAME")
-          SYSPROMPT_OVERRIDE=true
-          break
-        fi
         ;;
     esac
   done
@@ -822,6 +839,74 @@ DrawModelMenu() {
 
   echo -e "\n${dim}Use the arrow keys to navigate.\n\nPress ENTER to select a model"
   echo -e "${default}a${dim}: add  ${default}d${dim}: delete  ${default}s${dim}: set as default  ${default}q${dim}: quit"
+}
+
+# Function to draw the system prompt selection menu with arrow
+DrawSystemPromptMenu() {
+  # $1 = total number of items (system prompts + [none])
+  # $2 = fullredraw (true -> reload prompts and redraw menu | false -> just move the cursor) [DEFAULT: true]
+  local items_count=$1
+  local fullredraw=$2
+  local i=1
+
+  if [ "$fullredraw" = false ]; then
+    # Only move the arrow cursor
+    tput sc
+    for ((i=1; i<=items_count; i++)); do
+      [[ $i -eq "$CURSOR_POS" ]] && arrow=" ${blue}→${default}" || arrow="  "
+      tput cup $(( i+4 )) 0
+      echo -n "$arrow"
+    done
+    tput rc
+    return
+  fi
+
+  # Full redraw
+  tput civis
+  tput clear
+  echo -e "\n${lightgreybg}System Prompts:${default}\n"
+
+  local SHOW_COMPACT_MENU=false
+  termwidth=$(tput cols)
+  if [ "$termwidth" -gt 88 ]; then
+    printf "   %-40s %-1s\n" "Name" "Is Default?"
+    printf "   %-40s %-1s\n" "----" "-----------"
+  else
+    SHOW_COMPACT_MENU=true
+    printf "   %-40s %-1s\n" "Name" "Is Default?"
+    printf "   %-40s %-1s\n" "----" "-----------"
+  fi
+
+  local default_sp
+  default_sp=$(jq -r '.default_system_prompt // ""' "$CONFIG_FILENAME" 2>/dev/null)
+
+  # Render [none] first
+  if [ -z "$default_sp" ]; then
+    default_color="${green}"; checkmark="✓"
+  else
+    default_color="${default}"; checkmark=""
+  fi
+  [[ $CURSOR_POS -eq 1 ]] && arrow="${blue}→${default}" || arrow=" "
+  printf " ${arrow} ${default_color}%-40s${default} ${green}%8s${default}\n" "[none]" "$checkmark"
+
+  # Render actual prompts
+  local prompts_json
+  prompts_json=$(jq -r '.systemprompts' "$SYSTEMPROMPTS_FILENAME")
+  i=2
+  local name name_color default_check
+  while IFS= read -r name; do
+    if [ "$name" = "$default_sp" ]; then
+      name_color="${green}"; default_check="✓"
+    else
+      name_color="${default}"; default_check=""
+    fi
+    [[ $CURSOR_POS -eq $i ]] && arrow="${blue}→${default}" || arrow=" "
+    printf " ${arrow} ${name_color}%-40s${default} ${green}%8s${default}\n" "$name" "$default_check"
+    ((i++))
+  done < <(jq -r '.[].name' <<<"$prompts_json")
+
+  echo -e "\n${dim}Use the arrow keys to navigate.\n\nPress ENTER to select a system prompt"
+  echo -e "${default}a${dim}: add  ${default}e${dim}: edit  ${default}d${dim}: delete  ${default}s${dim}: set as default  ${default}q${dim}: quit"
 }
 
 # Main model management function
