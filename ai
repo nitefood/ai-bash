@@ -13,9 +13,8 @@
 # │ (Launch the script with the -h parameter or visit the project's homepage)            │
 # ╰──────────────────────────────────────────────────────────────────────────────────────╯
 
-# TODO: customizable system prompting (to "prime" the assistant)
 # TODO: temperature setting and presets
-AI_VERSION="1.0-beta+5"
+AI_VERSION="1.0.0-beta+6"
 
 # Color scheme
 green=$'\e[38;5;035m'
@@ -42,6 +41,7 @@ WORKING_DIR="${HOME}/.config/ai-bash"
 CONFIG_FILENAME="config.json" # Configuration file
 CONVERSATIONS_FILENAME="conversations.json" # Stored conversations file
 TMP_CONVERSATIONS_FILENAME=".${CONVERSATIONS_FILENAME}.tmp" # swap conversation filename
+SYSTEMPROMPTS_FILENAME="systemprompts.json"
 CONVERSATION_TOPIC="\"new conversation\"" # Default name for a new conversation
 CONVERSATION_BUFFER_LEN=0 # Conversation buffer length (number of messages the AI will try to remember) - default: 0 (unlimited and handled on server side)
 RETRY_WAIT_TIME=10 # Retry wait time in case of server error
@@ -50,6 +50,8 @@ IMAGES_TO_GENERATE=1
 CONFIG_FILENAME="${WORKING_DIR}/${CONFIG_FILENAME}"
 CONVERSATIONS_FILENAME="${WORKING_DIR}/${CONVERSATIONS_FILENAME}"
 TMP_CONVERSATIONS_FILENAME="${WORKING_DIR}/${TMP_CONVERSATIONS_FILENAME}"
+SYSTEMPROMPTS_FILENAME="${WORKING_DIR}/${SYSTEMPROMPTS_FILENAME}"
+CURRENT_SYSTEMPROMPT=""
 CURRENT_MODEL=""
 CURSOR_POS=1
 
@@ -74,7 +76,7 @@ StatusbarMessage() { # invoke without parameters to delete the status bar messag
 }
 
 ShowCommandsRecap() {
-  echo -en "\n${dim}${green}Enter an empty line to send your query, ${default}${green}?${dim} to view previous conversations or ${default}${green}!${dim} to change model\n${default}${green}"
+  echo -en "\n${dim}${green}Enter an empty line to send your query, ${default}${green}?${dim} to view previous conversations, ${default}${green}!${dim} to change model or ${default}${green}*${dim} to manage system prompts\n${default}${green}"
 }
 
 ChatBubble() {
@@ -97,10 +99,16 @@ ChatBubble() {
     tokencount_text=""
   fi
 
+  # Append system prompt name to model name if set
+  local model_display="$model_name"
+  if [ -n "$CURRENT_SYSTEMPROMPT" ]; then
+    model_display+=" ${bluebg} SYS: $CURRENT_SYSTEMPROMPT ${default}${green}"
+  fi
+
   conversation_topic_colorsstripped=""
   if [ -n "${conversation_topic}" ]; then
     conversation_topic=" ${dim}[Topic: ${default}${bubblecolor}${conversation_topic}${dim}"
-    [[ "$speaker" != "$model_name" ]] && conversation_topic+=", Model: ${default}${bubblecolor}${model_name}${dim}"
+    [[ "$speaker" != "$model_name" ]] && conversation_topic+=", Model: ${default}${bubblecolor}${model_display}${dim}"
     conversation_topic+="]"
     # strip colors from $conversation_topic for bubble border length calculation
     conversation_topic_colorsstripped=$(sed -r 's/\x1B\[[0-9;]*[JKmsu]//g' <<<"$conversation_topic")
@@ -117,6 +125,147 @@ ChatBubble() {
   printf '╯\n'
 }
 
+#############################
+# System Prompt Management  #
+#############################
+
+# Ensure system prompts file exists and is valid
+InitializeSystemPrompts() {
+  mkdir -p "$WORKING_DIR"
+  if [ ! -f "$SYSTEMPROMPTS_FILENAME" ]; then
+    echo '{"systemprompts":[]}' > "$SYSTEMPROMPTS_FILENAME"
+  fi
+  if ! jq empty "$SYSTEMPROMPTS_FILENAME" >/dev/null 2>&1; then
+    echo '{"systemprompts":[]}' > "$SYSTEMPROMPTS_FILENAME"
+  fi
+}
+
+# Read multiline input from stdin until Ctrl-D (EOF)
+MultiLineInput() {
+  local header="$1"
+  local tf
+  tf="$(mktemp)"
+  echo -e "$header" >&2
+  cat > "$tf"
+  # output normalized (CRLF->LF) content to stdout and cleanup
+  sed 's/\r$//' "$tf"
+  rm -f "$tf"
+}
+
+# List, create, edit, delete, and select system prompts
+ManageSystemPrompts() {
+  InitializeSystemPrompts
+  while true; do
+    tput clear
+    echo -e "\n${lightgreybg}System Prompts:${default}\n"
+    local prompts_count i prompt_name prompt_content
+    prompts_count=$(jq '.systemprompts | length' "$SYSTEMPROMPTS_FILENAME")
+    echo "  ${white}0) [none]${default}"
+    for ((i=0; i<prompts_count; i++)); do
+      prompt_name=$(jq -r ".systemprompts[$i].name" "$SYSTEMPROMPTS_FILENAME")
+      prompt_content=$(jq -r ".systemprompts[$i].content" "$SYSTEMPROMPTS_FILENAME")
+      # Wrap prompt_content to fit terminal width, indent after name
+      name_field=$(printf "%-20s" "$prompt_name")
+      prefix=" $(printf "%2d) ${blue}%s${default}  " "$((i+1))" "$name_field")"
+      prefix_len=${#prefix}
+      wrap_width=$((terminal_width - prefix_len))
+      # Use fold to wrap; count lines; indent lines 2..; truncate to first 10 lines and add placeholder if longer
+      # shellcheck disable=SC2183
+      indent=$(printf '%*s' "$(( prefix_len - 15 ))") # subtract 15 to account for color codes
+      wrapped=$(echo -e "$prompt_content" | fold -s -w $wrap_width)
+      line_count=$(echo -e "$wrapped" | wc -l)
+      wrapped_indented=$(echo -e "$wrapped" | sed "2,\$s/^/$indent/")
+      truncated=$(echo -e "$wrapped_indented" | head -n 10)
+      printf "%s%s\n" "$prefix" "${dim}${truncated}${default}"
+      if [ "$line_count" -gt 10 ]; then
+        printf "%s%s\n" "$indent" "${dim}[...]${default}"
+      fi
+    done
+    echo -e "\n${dim}Enter a number to select a system prompt."
+    echo "${default}a${dim}: add  ${default}e${dim}: edit  ${default}d${dim}: delete  ${default}q${dim}: quit${default}"
+    read -erp "» " sysmenuinput
+    case "$sysmenuinput" in
+      0)
+        CURRENT_SYSTEMPROMPT=""
+        break
+        ;;
+      a|A)
+        # Add new system prompt
+        read -erp "Enter prompt name (max 20 chars, unique): " newname
+        if [ -z "$newname" ] || [ ${#newname} -gt 20 ]; then
+          echo "Name must be 1-20 characters."
+          sleep 2
+          continue
+        fi
+        # Check uniqueness
+        if jq -e --arg name "$newname" '.systemprompts[] | select(.name == $name)' "$SYSTEMPROMPTS_FILENAME" >/dev/null; then
+          echo "Name already exists."
+          sleep 2
+          continue
+        fi
+        newcontent="$(MultiLineInput 'Enter prompt content (press Ctrl-D when done):')"
+        if [ -z "$newcontent" ]; then
+          echo "Content cannot be empty."
+          sleep 2
+          continue
+        fi
+        jq --arg name "$newname" --arg content "$newcontent" '.systemprompts += [{name: $name, content: $content}]' "$SYSTEMPROMPTS_FILENAME" > temp.json && mv temp.json "$SYSTEMPROMPTS_FILENAME"
+        ;;
+      e|E)
+        read -erp "Enter number to edit: " editnum
+        if ! [[ "$editnum" =~ ^[0-9]+$ ]] || [ "$editnum" -lt 1 ] || [ "$editnum" -gt "$prompts_count" ]; then
+          echo "Invalid selection."
+          sleep 2
+          continue
+        fi
+        idx=$((editnum-1))
+        oldname=$(jq -r ".systemprompts[$idx].name" "$SYSTEMPROMPTS_FILENAME")
+        oldcontent=$(jq -r ".systemprompts[$idx].content" "$SYSTEMPROMPTS_FILENAME")
+        read -erp "Edit name (max 20 chars, unique) [${blue}$oldname${default}]: " newname
+        [ -z "$newname" ] && newname="$oldname"
+        if [ ${#newname} -gt 20 ]; then
+          echo "Name must be 1-20 characters."
+          sleep 2
+          continue
+        fi
+        # Check uniqueness (allow unchanged)
+        if [ "$newname" != "$oldname" ] && jq -e --arg name "$newname" '.systemprompts[] | select(.name == $name)' "$SYSTEMPROMPTS_FILENAME" >/dev/null; then
+          echo "Name already exists."
+          sleep 2
+          continue
+        fi
+        # Show current prompt to the user (sent to stderr so it won't be captured)
+        echo -e "\nCurrent prompt:\n${dim}${oldcontent}${default}\n" >&2
+        newcontent="$(MultiLineInput 'Edit prompt content (press Ctrl-D when done). Leave empty to keep current:')"
+        # If user provided empty content explicitly in editor/EOF, keep old content
+        [ -z "$newcontent" ] && newcontent="$oldcontent"
+        jq --argjson idx "$idx" --arg name "$newname" --arg content "$newcontent" '(.systemprompts[$idx]) |= {name: $name, content: $content}' "$SYSTEMPROMPTS_FILENAME" > temp.json && mv temp.json "$SYSTEMPROMPTS_FILENAME"
+        ;;
+      d|D)
+        read -erp "Enter number to delete: " delnum
+        if ! [[ "$delnum" =~ ^[0-9]+$ ]] || [ "$delnum" -lt 1 ] || [ "$delnum" -gt "$prompts_count" ]; then
+          echo "Invalid selection."
+          sleep 2
+          continue
+        fi
+        idx=$((delnum-1))
+        jq --argjson idx "$idx" 'del(.systemprompts[$idx])' "$SYSTEMPROMPTS_FILENAME" > temp.json && mv temp.json "$SYSTEMPROMPTS_FILENAME"
+        ;;
+      q|Q)
+        break
+        ;;
+      *)
+        # Select system prompt
+        if [[ "$sysmenuinput" =~ ^[0-9]+$ ]] && [ "$sysmenuinput" -ge 1 ] && [ "$sysmenuinput" -le "$prompts_count" ]; then
+          idx=$((sysmenuinput-1))
+          CURRENT_SYSTEMPROMPT=$(jq -r ".systemprompts[$idx].name" "$SYSTEMPROMPTS_FILENAME")
+          break
+        fi
+        ;;
+    esac
+  done
+}
+
 SendChat() {
   # Param ("$@"): the full conversation buffer in JSON format
   # trim input to only contain the most recent CONVERSATION_BUFFER_LEN elements
@@ -124,6 +273,13 @@ SendChat() {
     input=$(jq ".[-$CONVERSATION_BUFFER_LEN:]" <<<"$@")
   else
     input=$(jq '.' <<<"$@")
+  fi
+  # Prepend system prompt (if any) as the first message
+  if [ -n "$CURRENT_SYSTEMPROMPT" ] && [ -f "$SYSTEMPROMPTS_FILENAME" ]; then
+    system_content=$(jq -r --arg name "$CURRENT_SYSTEMPROMPT" '.systemprompts[] | select(.name == $name) | .content' "$SYSTEMPROMPTS_FILENAME")
+    if [ -n "$system_content" ] && [ "$system_content" != "null" ]; then
+      input=$(jq --arg content "$system_content" '[{"role":"system","content":$content}] + .' <<<"$input")
+    fi
   fi
   local model_endpoint api_key
   model_endpoint=$(jq -r ".models.\"$CURRENT_MODEL\".endpoint" "$CONFIG_FILENAME")
@@ -303,7 +459,17 @@ SaveConversation() {
   fi
   if [ -w "$CONVERSATIONS_FILENAME" ]; then
     # conversations file is writeable
-    json_conversation=$(jq --arg model "$CURRENT_MODEL" '{"model": $model, "conversation_name": '"$CONVERSATION_TOPIC"', "conversation": .}' <<<"$conversation_history")
+    # Snapshot current system prompt (store name and content for reproducibility)
+    system_content=""
+    if [ -n "$CURRENT_SYSTEMPROMPT" ] && [ -f "$SYSTEMPROMPTS_FILENAME" ]; then
+      system_content=$(jq -r --arg name "$CURRENT_SYSTEMPROMPT" '.systemprompts[] | select(.name == $name) | .content' "$SYSTEMPROMPTS_FILENAME")
+    fi
+    json_conversation=$(jq \
+      --arg model "$CURRENT_MODEL" \
+      --arg sp_name "$CURRENT_SYSTEMPROMPT" \
+      --arg sp_content "$system_content" \
+      '{"model": $model, "conversation_name": '"$CONVERSATION_TOPIC"', "conversation": ., "system_prompt": (if $sp_name == "" then null else {name:$sp_name, content:$sp_content} end)}' \
+      <<<"$conversation_history")
     jq --argjson conversation "$json_conversation" '. += [$conversation]' "${CONVERSATIONS_FILENAME}" > "${TMP_CONVERSATIONS_FILENAME}" && \
       mv "${TMP_CONVERSATIONS_FILENAME}" "${CONVERSATIONS_FILENAME}"
   fi
@@ -398,6 +564,8 @@ SwitchConversation() {
   # and switch the topic and model
   CONVERSATION_TOPIC=$(jq '.conversation_name' <<<"$conversation_json")
   conversation_model=$(jq -r '.model' <<<"$conversation_json")
+  # Restore system prompt selection, if present
+  CURRENT_SYSTEMPROMPT=$(jq -r '.system_prompt.name // ""' <<<"$conversation_json")
   # show the old conversation to the user
   ReplayConversationMessages "$conversation_model"
   if ! SetCurrentModel "$conversation_model"; then
@@ -422,13 +590,16 @@ ShowConversationsMenu() {
     if [ "$num_previous_conversations" = "0" ]; then
       echo -en "\n  ${yellow}No previous/other conversations found!"
     else
-      title_list=$(jq '.[].conversation_name' "$CONVERSATIONS_FILENAME")
-      model_list=$(jq -r '.[].model' "$CONVERSATIONS_FILENAME")
       i=1
-      paste <(echo "$title_list") <(echo "$model_list") | while IFS=$'\t' read -r title model; do
-      printf "\n%3d) %-50s %-30s" "$i" "$title" "${blue}${dim}[$model]${default}${yellow}"
-      (( i++ ))
-      done
+      while IFS=$'\t' read -r title model prompt; do
+        if [ -n "$prompt" ]; then
+          prompt_str=" ${magenta}${dim}[SYS: $prompt]${default}${yellow}"
+        else
+          prompt_str=""
+        fi
+        printf "\n%3d) %-50s %-30s%s" "$i" "$title" "${blue}${dim}[$model]${default}${yellow}" "$prompt_str"
+        (( i++ ))
+      done < <(jq -r '.[] | [.conversation_name, .model, (.system_prompt.name // "")] | @tsv' "$CONVERSATIONS_FILENAME")
     fi
     echo -e "\n\n  ${bold}0) START A NEW CONVERSATION${default}${yellow}"
     echo -e "\n\n${dim}Choose a conversation to continue, or\n${default}${yellow}[   0   ]${default}${yellow}${dim} to start a new conversation\n${default}${yellow}[ ENTER ]${default}${yellow}${dim} to return to the current one\n"
@@ -568,10 +739,8 @@ DrawModelMenu() {
     ((i++))
   done < <(jq -r 'keys[]' <<<"$config_content")
 
-  echo -e "\n${dim}Use the arrow keys to navigate.\n\nPress ENTER to select a model\n${default}${blue}a${default}${dim} to add a new model"
-  echo -e "${default}${blue}d${default}${dim} to delete a model"
-  echo -e "${default}${blue}s${default}${dim} to set a model as default${default}"
-  echo -e "${default}${blue}q${default}${dim} to quit${default}"
+  echo -e "\n${dim}Use the arrow keys to navigate.\n\nPress ENTER to select a model"
+  echo -e "${default}a${dim}: add  ${default}d${dim}: delete  ${default}s${dim}: set as default  ${default}q${dim}: quit"
 }
 
 # Main model management function
@@ -906,6 +1075,32 @@ CoreutilsFixup() {
 		sed() { gsed "$@"; }
 		export -f sed
 	fi
+	if [ -x "$(command -v gfold)" ]; then
+		fold() { gfold "$@"; }
+		export -f fold
+	fi
+}
+
+GetFullParamsFromCurrentPosition() {
+  #
+  # Helper function that retrieves all the command line
+  # parameters starting from position $OPTIND (current
+  # option's argument as being parsed by getopts)
+  #
+  # 1) first param is set to current option's param (space-separated)
+  # 2) then append (if any exist) the following command line params.
+  #
+  # this allows for invocations such as 'ai -i SENTENCE WITH SPACES'
+  # without having to quote SENTENCE WITH SPACES
+  # The function requires passing the original $@ as parameter
+  # so as to not confuse it with the function's own $@.
+  #
+  # in the above example, $OPTARG="SENTENCE", $OPTIND="3", ${@:$OPTIND}=array("WITH" "SPACES")
+  #
+  userinput="$OPTARG"
+  for option in "${@:$OPTIND}"; do
+    userinput+=" $option"
+  done
 }
 
 #*
@@ -940,28 +1135,6 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
     # ':' -> missing mandatory parameter to the option
     optspec=":hcd:lim"
     while getopts "$optspec" optchar; do {
-      GetFullParamsFromCurrentPosition() {
-        #
-        # Helper function that retrieves all the command line
-        # parameters starting from position $OPTIND (current
-        # option's argument as being parsed by getopts)
-        #
-        # 1) first param is set to current option's param (space-separated)
-        # 2) then append (if any exist) the following command line params.
-        #
-        # this allows for invocations such as 'ai -i SENTENCE WITH SPACES'
-        # without having to quote SENTENCE WITH SPACES
-        # The function requires passing the original $@ as parameter
-        # so as to not confuse it with the function's own $@.
-        #
-        # in the above example, $OPTARG="SENTENCE", $OPTIND="3", ${@:$OPTIND}=array("WITH" "SPACES")
-        #
-        userinput="$OPTARG"
-        for option in "${@:$OPTIND}"; do
-          userinput+=" $option"
-        done
-      }
-
       case "${optchar}" in
       "h")
         # display usage help
@@ -1039,13 +1212,16 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
           echo -e "\n\nNo previous conversation found.${default}"
           exit 0
         fi
-        title_list=$(jq '.[].conversation_name' "$CONVERSATIONS_FILENAME")
-        model_list=$(jq -r '.[].model' "$CONVERSATIONS_FILENAME")
         i=1
-        paste <(echo "$title_list") <(echo "$model_list") | while IFS=$'\t' read -r title model; do
-            printf "\n%3d) %-50s %-30s" "$i" "$title" "${blue}${dim}[$model]${default}${yellow}"
-          (( i++ ))
-        done
+        while IFS=$'\t' read -r title model prompt; do
+            if [ -n "$prompt" ]; then
+              prompt_str=" ${magenta}${dim}[SYS: $prompt]${default}${yellow}"
+            else
+              prompt_str=""
+            fi
+            printf "\n%3d) %-50s %-30s%s" "$i" "$title" "${blue}${dim}[$model]${default}${yellow}" "$prompt_str"
+            (( i++ ))
+        done < <(jq -r '.[] | [.conversation_name, .model, (.system_prompt.name // "")] | @tsv' "$CONVERSATIONS_FILENAME")
         echo -e "\n\n${default}Use ${blue}${bold}ai -c${default} to continue last conversation, ${blue}${bold}ai -c <id>${default} to continue a specific one, or ${blue}${bold}ai -d <id>${default} to delete it"
         exit
         ;;
@@ -1200,6 +1376,7 @@ while true; do
   userinput=""
   SHOW_CONVMENU=false
   SHOW_MODELMENU=false
+  SHOW_SYSPROMPTMENU=false
   ChatBubble "YOU" "${greenbg}" "${green}" "null" "${CURRENT_MODEL}" "${CONVERSATION_TOPIC}"
   while true; do
     read -erp "» " inputline
@@ -1208,6 +1385,9 @@ while true; do
       break
     elif [ "$inputline" = "!" ]; then
       SHOW_MODELMENU=true
+      break
+    elif [ "$inputline" = "*" ]; then
+      SHOW_SYSPROMPTMENU=true
       break
     fi
     if [ -z "$inputline" ]; then
@@ -1230,6 +1410,9 @@ while true; do
     ShowCommandsRecap
   elif [ "$SHOW_MODELMENU" = true ]; then
     ManageModels
+    ShowCommandsRecap
+  elif [ "$SHOW_SYSPROMPTMENU" = true ]; then
+    ManageSystemPrompts
     ShowCommandsRecap
   else
     # escape user input to create a JSON string, safe to pass on
