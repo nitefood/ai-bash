@@ -217,9 +217,16 @@ MarkdownEcho() {
   fi
 }
 
+#!######################################################################################################################################################
+
+#!#############################
+#! Image generation functions #
+#!#############################
+
+# TODO: support more endpoints
+
 GenerateImage() {
   local model_endpoint api_key
-  # TODO: support more endpoints
   model_endpoint="https://api.openai.com/v1/images/generations"
   api_key=$(jq -r '.models.'"$CURRENT_MODEL"'.api_key' "$CONFIG_FILENAME")
   while true; do
