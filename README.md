@@ -55,13 +55,17 @@
 
   `ai -m`
 
+###### Manage system prompts (add/delete/set default):
+
+  `ai -s`
+
 ###### Start a new interactive conversation:
 
-`ai [-m <modelname>]`
+`ai [-m <model_name>|-s <sysprompt_name>]`
 
 ###### Single turn Q&A (will ask you to continue interacting, otherwise quit after answer):
 
-`ai [-m <modelname>] "how many planets are there in the solar system?"`
+`ai [-m <model_name>|-s <sysprompt_name>] "how many planets are there in the solar system?"`
 
 ###### Generate one or more images (default 1, max 10):
 
@@ -69,7 +73,7 @@
 
 ###### Submit data as part of the question:
 
-`cat file.txt | ai [-m <modelname>] can you summarize the contents of this file?`
+`cat file.txt | ai [-m <model_name>|-s <sysprompt_name>] "can you summarize the contents of this file?"`
 
 ###### List saved conversations:
 
@@ -121,9 +125,9 @@
 
 ###### Prerequisites:
 
-* Install jq, curl, imagemagick, catimg
+* Install jq, curl, imagemagick, catimg, fzf
   
-  * for e.g. Ubuntu: `apt -y install jq curl imagemagick catimg`
+  * for e.g. Ubuntu: `apt -y install jq curl imagemagick catimg fzf`
 
 * Install [glow](https://github.com/charmbracelet/glow#installation) for Markdown rendering support in your terminal
 
