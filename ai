@@ -148,13 +148,13 @@ SetCurrentSystemPrompt() {
   if [ -z "$name" ]; then
     CURRENT_SYSTEMPROMPT=""
     echo -e "\n${blue}${dim}[System prompt cleared]${default}"
-  SYSPROMPT_OVERRIDE=true
+    SYSPROMPT_OVERRIDE=true
     return 0
   fi
   if jq -e --arg name "$name" '.systemprompts[] | select(.name == $name)' "$SYSTEMPROMPTS_FILENAME" >/dev/null; then
     CURRENT_SYSTEMPROMPT="$name"
     echo -e "\n${blue}${dim}[System prompt set to ${default}${blue}${CURRENT_SYSTEMPROMPT}${dim}]${default}"
-  SYSPROMPT_OVERRIDE=true
+    SYSPROMPT_OVERRIDE=true
     return 0
   else
     echo -e "${yellowbg} WARNING ${default}${yellow}${dim} System prompt ${default}${yellow}\"$name\"${dim} not found.${default}"
@@ -1371,7 +1371,7 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
         echo -e "${dim}Show this help:${default}\n  ${blue}ai -h${default}"
         echo -e "${dim}Manage models (add/delete/set default):${default}\n  ${blue}ai -m${default}"
         echo -e "${dim}Manage system prompts:${default}\n  ${blue}ai -s${default}"
-        echo -e "${dim}Start a new interactive conversation:${default}\n  ${blue}ai [-m <model_name>|-s <sysprompt_name>]${default}"
+        echo -e "${dim}Start a new interactive conversation [optionally overriding the default model/system prompt]:${default}\n  ${blue}ai [-m <model_name>|-s <sysprompt_name>]${default}"
         echo -e "${dim}Single turn Q&A:${default}\n  ${blue}ai [-m <model_name>|-s <sysprompt_name>] \"how many planets are there in the solar system?\"${default}"
         echo -e "${dim}Generate one or more images (default: 1):${default}\n  ${blue}ai -i [num] \"a cute cat\"${default}"
         echo -e "${dim}Submit data as part of the question:${default}\n  ${blue}cat file.txt | ai [-m <model_name>|-s <sysprompt_name>] can you summarize the contents of this file?${default}"
