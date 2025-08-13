@@ -193,7 +193,7 @@ SystemPrompt_ListLines() {
   if [ -z "$default_sp" ]; then
     echo -e "__NONE__\ttrue\t${green}[none] ✓${default}"
   else
-    echo -e "__NONE__\tfalse\t[none]"
+    echo -e "__NONE__\tfalse\t${white}[none]${default}"
   fi
   # Real prompts
   jq -r '.systemprompts[] | .name' "$SYSTEMPROMPTS_FILENAME" | while IFS= read -r name; do
@@ -346,7 +346,7 @@ ManageSystemPrompts() {
           default_sp=$(jq -r '.default_system_prompt // ""' "$CONFIG_FILENAME" 2>/dev/null)
           if [ -n "$default_sp" ] && [ "$sel_name" = "$default_sp" ]; then
             jq '.default_system_prompt = null' "$CONFIG_FILENAME" > temp.json && mv temp.json "$CONFIG_FILENAME"
-            echo -e "${yellowbg} WARNING ${default} Default system prompt deleted. Default set to [none]."
+            echo -e "${yellowbg} WARNING ${default} Default system prompt deleted. Default set to ${green}[none]${default}."
           fi
           echo -e "${greenbg} SUCCESS ${default} System prompt ${green}$sel_name${default} deleted successfully."
           sleep 1
@@ -358,7 +358,7 @@ ManageSystemPrompts() {
         fi
         if [ "$sel_name" = "__NONE__" ]; then
           jq '.default_system_prompt = null' "$CONFIG_FILENAME" > temp.json && mv temp.json "$CONFIG_FILENAME"
-          echo -e "${greenbg} SUCCESS ${default} Default system prompt set to [none]."
+          echo -e "${greenbg} SUCCESS ${default} Default system prompt set to ${green}[none]${default}."
         else
           jq --arg name "$sel_name" '.default_system_prompt = $name' "$CONFIG_FILENAME" > temp.json && mv temp.json "$CONFIG_FILENAME"
           echo -e "${greenbg} SUCCESS ${default} Default system prompt set to ${green}$sel_name${default}."
