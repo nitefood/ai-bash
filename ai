@@ -80,6 +80,12 @@ ShowCommandsRecap() {
   echo -en "\n${dim}${green}Enter an empty line to send your query, ${default}${green}?${dim} to view previous conversations, ${default}${green}!${dim} to change model or ${default}${green}*${dim} to manage system prompts\n${default}${green}"
 }
 
+#!######################################################################################################################################################
+
+#!#################
+#! Chat functions #
+#!#################
+
 ChatBubble() {
   # Param ("$1"): speaker's name
   # Param ("$2"): speaker's name background color
@@ -95,7 +101,8 @@ ChatBubble() {
   # shellcheck disable=SC2124
   conversation_topic="$@"
   if [ -n "${total_tokens}" ] && [ "${total_tokens}" != "null" ]; then
-    tokencount_text=" ${dim}(total conversation tokens: ${total_tokens})${default}${bubblecolor}"
+    total_tokens_si=$(numfmt --to=si "$total_tokens")
+    tokencount_text=" ${dim}(total conversation tokens: ${total_tokens_si})${default}${bubblecolor}"
   else
     tokencount_text=""
   fi
@@ -126,9 +133,383 @@ ChatBubble() {
   printf '╯\n'
 }
 
-#############################
-# System Prompt Management  #
-#############################
+SendChat() {
+  # Param ("$@"): the full conversation buffer in JSON format
+  # trim input to only contain the most recent CONVERSATION_BUFFER_LEN elements
+  if [ "$CONVERSATION_BUFFER_LEN" -gt 0 ]; then
+    input=$(jq ".[-$CONVERSATION_BUFFER_LEN:]" <<<"$@")
+  else
+    input=$(jq '.' <<<"$@")
+  fi
+  # Prepend system prompt (if any) as the first message
+  if [ -n "$CURRENT_SYSTEMPROMPT" ] && [ -f "$SYSTEMPROMPTS_FILENAME" ]; then
+    system_content=$(jq -r --arg name "$CURRENT_SYSTEMPROMPT" '.systemprompts[] | select(.name == $name) | .content' "$SYSTEMPROMPTS_FILENAME")
+    if [ -n "$system_content" ] && [ "$system_content" != "null" ]; then
+      input=$(jq --arg content "$system_content" '[{"role":"system","content":$content}] + .' <<<"$input")
+    fi
+  fi
+  local model_endpoint api_key
+  model_endpoint=$(jq -r ".models.\"$CURRENT_MODEL\".endpoint" "$CONFIG_FILENAME")
+  api_key=$(jq -r ".models.\"$CURRENT_MODEL\".api_key" "$CONFIG_FILENAME")
+  while true; do
+    msg_buf_size=$(wc -c <<<"$input" | numfmt --to=iec)
+    StatusbarMessage "Request sent (size: ${bluebg}$msg_buf_size${lightgreybg} bytes) Waiting for AI to reply"
+    response_json=$(
+      curl -s "$model_endpoint" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $api_key" \
+        -d '{ "model": "'"$CURRENT_MODEL"'", "messages": '"$input"' }'
+    )
+    # DBG: save API call output to logfile
+    # echo -e "\n_____\nRequest: $input\nResponse: $response_json\n_____" >>"${WORKING_DIR}/ai.log"
+    ai_output=$(jq -c '.choices[0].message' <<<"$response_json")
+    # fetch total conversation token count from the response JSON
+    total_tokens=$(jq -r '.usage.totalTokens' <<<"$response_json")
+    if [ "$total_tokens" = "null" ]; then
+      # handle xAI API responses where the "totalTokens" key is called "total_tokens"
+      total_tokens=$(jq -r '.usage.total_tokens' <<<"$response_json")
+    fi
+  
+    if [ "$ai_output" = "null" ]; then
+      StatusbarMessage
+      error_type=$(jq -r '.error.type' <<<"$response_json" 2>/dev/null)
+      error_code=$(jq -r '.error.code' <<<"$response_json" 2>/dev/null)
+      error_msg=$(jq -r '.error.message' <<<"$response_json" 2>/dev/null)
+      if [ -z "$error_code" ]; then
+        error_type="-"
+        error_code="-"
+        # try fetching the 'error' key from the output (e.g. HF API)
+        error_msg=$(jq -r '.error' <<<"$response_json" 2>/dev/null)
+      fi
+      # check if the metadata field exists (OpenRouter API)
+      if [ -n "$(jq -r '.error.metadata' <<<"$response_json")" ]; then
+        openrouter_provider=$(jq -r '.error.metadata.provider_name' <<<"$response_json")
+        raw_error=$(jq -r '.error.metadata.raw' <<<"$response_json")
+        error_msg+=". Raw reply from provider (${yellow}${openrouter_provider}${default}): ${red}${dim}$raw_error${default}"
+      fi
+      echo -e "\n${red}- API ERROR -${default}" >&2
+      echo -e "${redbg} TYPE ${default} $error_type" >&2
+      echo -e "${redbg} CODE ${default} $error_code" >&2
+      echo -e "${redbg} MESG ${default} $error_msg" >&2
+      retryafter="$RETRY_WAIT_TIME"
+      while [[ ${retryafter} -gt 0 ]]; do
+        StatusbarMessage "AI error. Retrying in ${redbg}${retryafter}${lightgreybg} seconds"
+        sleep 1
+        (( retryafter-- ))
+      done
+    else
+      break
+    fi
+  done
+  StatusbarMessage
+  # Combine JSON data and token count into a single JSON object for the response
+  jq -n --argjson ai_output "$ai_output" --arg total_tokens "$total_tokens" '$ai_output + {total_tokens: $total_tokens}'
+}
+
+MarkdownEcho() {
+  # parse markdown with glow if installed
+  if command -v glow &>/dev/null; then
+    echo -e "$@" | glow
+  else
+    # glow is not installed, just trim leading and trailing newlines from the response
+    output=$(sed -e :a -e '/./,$!d;/^\n*$/{$d;N;};/\n$/ba' <<<"$@")
+    echo -e "$output"
+  fi
+}
+
+GenerateImage() {
+  local model_endpoint api_key
+  # TODO: support more endpoints
+  model_endpoint="https://api.openai.com/v1/images/generations"
+  api_key=$(jq -r '.models.'"$CURRENT_MODEL"'.api_key' "$CONFIG_FILENAME")
+  while true; do
+    msg_buf_size=$(wc -c <<<"$input" | numfmt --to=iec)
+    [[ "$IMAGES_TO_GENERATE" -gt 1 ]] && plural="s" || plural=""
+    StatusbarMessage "Generating ${bluebg}$IMAGES_TO_GENERATE${lightgreybg} 1024x1024 image${plural} using DALL·E 2"
+    response_json=$(
+      curl -s "$model_endpoint" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $api_key" \
+        -d '{"prompt": "'"$userinput"'", "n": '"$IMAGES_TO_GENERATE"', "size": "1024x1024"}'
+    )
+    ai_output=$(jq -r 'select (.data != null) | .data[].url' <<<"$response_json")
+    if [ -z "$ai_output" ]; then
+      StatusbarMessage
+      error_type=$(jq -r '.error.type' <<<"$response_json")
+      error_code=$(jq -r '.error.code' <<<"$response_json")
+      error_msg=$(jq -r '.error.message' <<<"$response_json")
+      echo -e "\n${red}- API ERROR -${default}" >&2
+      echo -e "${redbg} TYPE ${default} $error_type" >&2
+      echo -e "${redbg} CODE ${default} $error_code" >&2
+      echo -e "${redbg} MESG ${default} $error_msg" >&2
+      retryafter="$RETRY_WAIT_TIME"
+      while [[ ${retryafter} -gt 0 ]]; do
+        StatusbarMessage "AI error. Retrying in ${redbg}${retryafter}${lightgreybg} seconds"
+        sleep 1
+        (( retryafter-- ))
+      done
+    else
+      createdate=$(jq -r '.created' <<<"$response_json")
+      break
+    fi
+  done
+  StatusbarMessage
+  term_cols=$(tput cols)
+  tmpfile=$(mktemp)
+  imgcounter=1
+  arr_imgfiles=()
+  arr_imgurls=()
+  for imageurl in $ai_output; do
+    StatusbarMessage "Parsing image n.$imgcounter"
+    imgfile="${tmpfile}_${imgcounter}"
+    arr_imgfiles+=("$imgfile")
+    curl -s "$imageurl" > "$imgfile"
+    shortened_imgurl="$(curl -s "http://tinyurl.com/api-create.php?url=$imageurl")"
+    arr_imgurls+=("$shortened_imgurl")
+    StatusbarMessage
+    (( imgcounter++ ))
+  done
+  i=1
+  ( for imgfile in "${arr_imgfiles[@]}"; do
+      convert "$imgfile" -font DejaVu-Sans -pointsize 250 -fill magenta -gravity south -annotate +0+5 "$i" miff:-
+      (( i++ ))
+    done ) | montage - -background '#000000' -geometry +0+0 "$tmpfile.png"
+
+  echo -e "\n${default}\"${bold}${underline}${userinput}${default}\"\n"
+  catimg -w "$term_cols" "$tmpfile.png"
+  i=1
+  for imgurl in "${arr_imgurls[@]}"; do
+    echo -e "${blue}[$i]${default} - $imgurl"
+    (( i++ ))
+  done
+
+  savedir=$(date +"%Y_%m_%d-%H_%M_%S" -d @"$createdate")
+  savedir="${WORKING_DIR}/${savedir}_imgs"
+  echo ""
+  read -erp "${bold}Do you want to save the image(s) and prompt locally to ${blue}${savedir}${default} ? [Y/n]" wannasave
+  if [ -z "$wannasave" ] || [ "$wannasave" = "Y" ] || [ "$wannasave" = "y" ]; then
+    # save the images locally
+    mkdir -p "$savedir"
+    i=1
+    for imgfile in "${arr_imgfiles[@]}"; do
+      # move the individual image files to the savedir, renamed as 1.png, 2.png and so on
+      mv "$imgfile" "$savedir/$i.png"
+      (( i++ ))
+    done
+    # save the grid summary
+    mv "$tmpfile.png" "$savedir/preview_grid.png"
+    # and the prompt
+    echo "$userinput" > "$savedir/prompt.txt"
+  else
+    echo -e "\nNote: the image links will be valid for ${blue}2 hours${default}, after which the provider will delete them!\n"
+  fi
+  # delete any leftover temporary files
+  rm "${tmpfile}"*
+}
+
+#!######################################################################################################################################################
+
+#!####################################
+#! Conversation management functions #
+#!####################################
+
+UpdateConversationTopic() {
+  # $1 = full conversation history
+  temp_conversation_history=$(jq -c ". += [{\"role\": \"user\", \"content\": \"give me a 4-5 words title for this conversation. Don't list possible titles, come up with ONLY ONE and give it back. No other output must be given, beside the title itself.\"}]" <<<"$conversation_history")
+  CONVERSATION_TOPIC=$(SendChat "$temp_conversation_history" | jq -r '.content' | tr -d '\n')
+  # sometimes the AI replies with conversation names enclosed in double quotes, other times it has double quotes inside the topic description. Handle it
+  if [ "${CONVERSATION_TOPIC::1}" = '"' ] && [ "${CONVERSATION_TOPIC: -1}" = '"' ]; then
+    CONVERSATION_TOPIC=$(sed -e 's/^"//g' -e 's/"$//g' <<<"$CONVERSATION_TOPIC")
+  fi
+  CONVERSATION_TOPIC=$(echo -n "$CONVERSATION_TOPIC" | jq -Rs '.')
+}
+
+SaveConversation() {
+  [[ "$SAVE_CONVERSATION" = false ]] && return
+  current_conversation_size=$(jq -r '. | length' <<<"$conversation_history")
+  if [ "$current_conversation_size" -lt "$SAVE_CONVERSATION_MIN_SIZE" ]; then
+    return
+  fi
+  if [ -w "$CONVERSATIONS_FILENAME" ]; then
+    # conversations file is writeable
+    # Snapshot current system prompt (store name and content for reproducibility)
+    system_content=""
+    if [ -n "$CURRENT_SYSTEMPROMPT" ] && [ -f "$SYSTEMPROMPTS_FILENAME" ]; then
+      system_content=$(jq -r --arg name "$CURRENT_SYSTEMPROMPT" '.systemprompts[] | select(.name == $name) | .content' "$SYSTEMPROMPTS_FILENAME")
+    fi
+    json_conversation=$(jq \
+      --arg model "$CURRENT_MODEL" \
+      --arg sp_name "$CURRENT_SYSTEMPROMPT" \
+      --arg sp_content "$system_content" \
+      '{"model": $model, "conversation_name": '"$CONVERSATION_TOPIC"', "conversation": ., "system_prompt": (if $sp_name == "" then null else {name:$sp_name, content:$sp_content} end)}' \
+      <<<"$conversation_history")
+    jq --argjson conversation "$json_conversation" '. += [$conversation]' "${CONVERSATIONS_FILENAME}" > "${TMP_CONVERSATIONS_FILENAME}" && \
+      mv "${TMP_CONVERSATIONS_FILENAME}" "${CONVERSATIONS_FILENAME}"
+  fi
+}
+
+ReplayConversationMessages() {
+  # displays the messages in the $conversation_history buffer
+  # $1 = model name for this conversation
+  conversation_model="$1"
+  for row in $(jq -rc '.[]' <<<"$conversation_history"); do
+    speaker=$(jq -r '.role' <<<"$row")
+    rowcontent=$(jq -r '.content' <<<"$row")
+    case "${speaker}" in
+    "user")
+      speaker="YOU"
+      color="$green"
+      colorbg="$greenbg"
+      ;;
+    "assistant")
+      speaker="$conversation_model"
+      color="$white"
+      colorbg="$lightgreybg"
+      ;;
+    esac
+    ChatBubble "$speaker" "$colorbg" "$color" "null" "$speaker"
+    if [ "$speaker" = "$conversation_model" ]; then
+      # preserve markdown formatting in LLM replies
+      MarkdownEcho "$rowcontent"
+    else
+      for line in $(echo -e "$rowcontent"); do
+        echo -e "» $line"
+      done
+    fi
+  done
+}
+
+ParseConversationsFile() {
+  # check if conversation storing is enabled
+  if [ "$SAVE_CONVERSATION" = true ]; then
+    # load conversations file
+    if [ ! -f "$CONVERSATIONS_FILENAME" ]; then
+      if [ "$CONTINUE_CONVERSATION" = true ]; then
+        echo "Error: conversations file does not exist, cannot continue last conversation"
+        exit 1
+      elif [ "$DELETE_CONVERSATION" = true ]; then
+        echo "Error: conversations file does not exist, cannot delete conversation"
+        exit 1
+      fi
+      # conversations file does not exist, initialize it
+      echo "[]" > "$CONVERSATIONS_FILENAME"
+      num_previous_conversations=0
+    else
+      num_previous_conversations=$(jq '. | length' "${CONVERSATIONS_FILENAME}" 2>/dev/null)
+      if [ -z "$num_previous_conversations" ]; then
+        if [ "$CONTINUE_CONVERSATION" = true ]; then
+          echo "Error: conversations file is corrupted, cannot continue last conversation"
+          exit 1
+        elif [ "$DELETE_CONVERSATION" = true ]; then
+          echo "Error: conversations file is corrupted, cannot delete conversation"
+          exit 1
+        fi
+        # conversations file is invalid, reinitialize it
+        echo "[]" > "$CONVERSATIONS_FILENAME"
+        num_previous_conversations=0
+      fi
+    fi
+  fi
+}
+
+SwitchConversation() {
+  #
+  # @param $1 => conversation id (JSON array index) to switch to
+  #
+  # extract the requested conversation JSON
+  conversation_json=$(jq '.['"$1"']' "$CONVERSATIONS_FILENAME")
+  # load the new conversation into the current session
+  conversation_history=$(jq '.conversation' <<<"$conversation_json")
+  # update the conversation messages number
+  conversation_messages=$(jq 'length' <<<"$conversation_history")
+  # and switch the topic and model
+  CONVERSATION_TOPIC=$(jq '.conversation_name' <<<"$conversation_json")
+  conversation_model=$(jq -r '.model' <<<"$conversation_json")
+  # Restore system prompt selection, if present
+  CURRENT_SYSTEMPROMPT=$(jq -r '.system_prompt.name // ""' <<<"$conversation_json")
+  # show the old conversation to the user
+  ReplayConversationMessages "$conversation_model"
+  if ! SetCurrentModel "$conversation_model"; then
+    # the model for this conversation is not found in the configuration file, try to switch to the default model
+    if ! SetCurrentModel; then
+      # the default model is not found in the configuration file, cannot continue
+      exit 1
+    fi
+  fi
+  # delete the old conversation from the conversations file.
+  # an updated version of this conversation will be saved at the end of this session
+  jq 'del (.['"$1"'])' "${CONVERSATIONS_FILENAME}" > "${TMP_CONVERSATIONS_FILENAME}" && \
+    mv "${TMP_CONVERSATIONS_FILENAME}" "${CONVERSATIONS_FILENAME}"
+}
+
+ShowConversationsMenu() {
+  if [ "$SAVE_CONVERSATION" = true ]; then
+    ParseConversationsFile
+    echo -e "\n\n${yellowbg} Current conversation ${default}${yellow}"
+    printf "\n     %-50s %-30s" "$CONVERSATION_TOPIC" "${blue}${dim}[$CURRENT_MODEL]${default}${yellow}"
+    echo -en "\n\n${yellowbg} Previous conversations ${default}${yellow}"
+    if [ "$num_previous_conversations" = "0" ]; then
+      echo -en "\n  ${yellow}No previous/other conversations found!"
+    else
+      i=1
+      while IFS=$'\t' read -r title model prompt; do
+        if [ -n "$prompt" ]; then
+          prompt_str=" ${magenta}${dim}[SYS: $prompt]${default}${yellow}"
+        else
+          prompt_str=""
+        fi
+        printf "\n%3d) %-50s %-30s%s" "$i" "$title" "${blue}${dim}[$model]${default}${yellow}" "$prompt_str"
+        (( i++ ))
+      done < <(jq -r '.[] | [.conversation_name, .model, (.system_prompt.name // "")] | @tsv' "$CONVERSATIONS_FILENAME")
+    fi
+    echo -e "\n\n  ${bold}0) START A NEW CONVERSATION${default}${yellow}"
+    echo -e "\n\n${dim}Choose a conversation to continue, or\n${default}${yellow}[   0   ]${default}${yellow}${dim} to start a new conversation\n${default}${yellow}[ ENTER ]${default}${yellow}${dim} to return to the current one\n"
+    while true; do
+      read -erp "${default}${yellow}» " convmenuinput
+      if [ -n "$convmenuinput" ]; then
+        if [[ $convmenuinput =~ ^[0-9]+$ ]]; then
+          # user entered a valid integer
+          if [ "$convmenuinput" -gt "$num_previous_conversations" ] || [ "$convmenuinput" -lt 0 ]; then
+            echo "Please enter a number between 0 and $num_previous_conversations"
+            continue
+          else
+            (( convmenuinput-- )) # convmenuinput now points to the appropriate conversations JSON array index
+            break
+          fi
+        else
+          echo "Please enter a number between 0 and $num_previous_conversations"
+        fi
+      else
+        # user pressed enter, abort
+        echo
+        break
+      fi
+    done
+    if [ -n "$convmenuinput" ]; then
+      # user chose to continue a conversation or start a new one, first of all save the current one to disk
+      SaveConversation
+      if [ "$convmenuinput" = "-1" ]; then
+        # the user entered '0' to start a new conversation
+        CONVERSATION_TOPIC="\"new conversation\""
+        conversation_history="[]"
+        conversation_messages=0
+        echo -e "\n${greenbg} NEW CONVERSATION STARTED ${default}\n"
+        return
+      else
+        # the users wants to continue a previous conversation
+        SwitchConversation "$convmenuinput"
+      fi
+    fi
+  else
+    echo -e "\n\n${redbg} ERROR ${default}${red} conversation saving is not enabled!\n"
+  fi
+}
+
+#!######################################################################################################################################################
+
+#!#####################################
+#! System Prompt Management functions #
+#!#####################################
 
 # Ensure system prompts file exists and is valid
 InitializeSystemPrompts() {
@@ -393,383 +774,12 @@ ManageSystemPromptOption() {
   fi
 }
 
-SendChat() {
-  # Param ("$@"): the full conversation buffer in JSON format
-  # trim input to only contain the most recent CONVERSATION_BUFFER_LEN elements
-  if [ "$CONVERSATION_BUFFER_LEN" -gt 0 ]; then
-    input=$(jq ".[-$CONVERSATION_BUFFER_LEN:]" <<<"$@")
-  else
-    input=$(jq '.' <<<"$@")
-  fi
-  # Prepend system prompt (if any) as the first message
-  if [ -n "$CURRENT_SYSTEMPROMPT" ] && [ -f "$SYSTEMPROMPTS_FILENAME" ]; then
-    system_content=$(jq -r --arg name "$CURRENT_SYSTEMPROMPT" '.systemprompts[] | select(.name == $name) | .content' "$SYSTEMPROMPTS_FILENAME")
-    if [ -n "$system_content" ] && [ "$system_content" != "null" ]; then
-      input=$(jq --arg content "$system_content" '[{"role":"system","content":$content}] + .' <<<"$input")
-    fi
-  fi
-  local model_endpoint api_key
-  model_endpoint=$(jq -r ".models.\"$CURRENT_MODEL\".endpoint" "$CONFIG_FILENAME")
-  api_key=$(jq -r ".models.\"$CURRENT_MODEL\".api_key" "$CONFIG_FILENAME")
-  while true; do
-    msg_buf_size=$(wc -c <<<"$input" | numfmt --to=iec)
-    StatusbarMessage "Request sent (size: ${bluebg}$msg_buf_size${lightgreybg} bytes) Waiting for AI to reply"
-    response_json=$(
-      curl -s "$model_endpoint" \
-        -H "Content-Type: application/json" \
-        -H "Authorization: Bearer $api_key" \
-        -d '{ "model": "'"$CURRENT_MODEL"'", "messages": '"$input"' }'
-    )
-    # DBG: save API call output to logfile
-    # echo -e "\n_____\nRequest: $input\nResponse: $response_json\n_____" >>"${WORKING_DIR}/ai.log"
-    ai_output=$(jq -c '.choices[0].message' <<<"$response_json")
-    # fetch total conversation token count from the response JSON
-    total_tokens=$(jq -r '.usage.totalTokens' <<<"$response_json")
-    if [ "$total_tokens" = "null" ]; then
-      # handle xAI API responses where the "totalTokens" key is called "total_tokens"
-      total_tokens=$(jq -r '.usage.total_tokens' <<<"$response_json")
-    fi
-  
-    if [ "$ai_output" = "null" ]; then
-      StatusbarMessage
-      error_type=$(jq -r '.error.type' <<<"$response_json" 2>/dev/null)
-      error_code=$(jq -r '.error.code' <<<"$response_json" 2>/dev/null)
-      error_msg=$(jq -r '.error.message' <<<"$response_json" 2>/dev/null)
-      if [ -z "$error_code" ]; then
-        error_type="-"
-        error_code="-"
-        # try fetching the 'error' key from the output (e.g. HF API)
-        error_msg=$(jq -r '.error' <<<"$response_json" 2>/dev/null)
-      fi
-      # check if the metadata field exists (OpenRouter API)
-      if [ -n "$(jq -r '.error.metadata' <<<"$response_json")" ]; then
-        openrouter_provider=$(jq -r '.error.metadata.provider_name' <<<"$response_json")
-        raw_error=$(jq -r '.error.metadata.raw' <<<"$response_json")
-        error_msg+=". Raw reply from provider (${yellow}${openrouter_provider}${default}): ${red}${dim}$raw_error${default}"
-      fi
-      echo -e "\n${red}- API ERROR -${default}" >&2
-      echo -e "${redbg} TYPE ${default} $error_type" >&2
-      echo -e "${redbg} CODE ${default} $error_code" >&2
-      echo -e "${redbg} MESG ${default} $error_msg" >&2
-      retryafter="$RETRY_WAIT_TIME"
-      while [[ ${retryafter} -gt 0 ]]; do
-        StatusbarMessage "AI error. Retrying in ${redbg}${retryafter}${lightgreybg} seconds"
-        sleep 1
-        (( retryafter-- ))
-      done
-    else
-      break
-    fi
-  done
-  StatusbarMessage
-  # Combine JSON data and token count into a single JSON object for the response
-  jq -n --argjson ai_output "$ai_output" --arg total_tokens "$total_tokens" '$ai_output + {total_tokens: $total_tokens}'
-}
+#!######################################################################################################################################################
 
-GenerateImage() {
-  local model_endpoint api_key
-  # TODO: support more endpoints
-  model_endpoint="https://api.openai.com/v1/images/generations"
-  api_key=$(jq -r '.models.'"$CURRENT_MODEL"'.api_key' "$CONFIG_FILENAME")
-  while true; do
-    msg_buf_size=$(wc -c <<<"$input" | numfmt --to=iec)
-    [[ "$IMAGES_TO_GENERATE" -gt 1 ]] && plural="s" || plural=""
-    StatusbarMessage "Generating ${bluebg}$IMAGES_TO_GENERATE${lightgreybg} 1024x1024 image${plural} using DALL·E 2"
-    response_json=$(
-      curl -s "$model_endpoint" \
-        -H "Content-Type: application/json" \
-        -H "Authorization: Bearer $api_key" \
-        -d '{"prompt": "'"$userinput"'", "n": '"$IMAGES_TO_GENERATE"', "size": "1024x1024"}'
-    )
-    ai_output=$(jq -r 'select (.data != null) | .data[].url' <<<"$response_json")
-    if [ -z "$ai_output" ]; then
-      StatusbarMessage
-      error_type=$(jq -r '.error.type' <<<"$response_json")
-      error_code=$(jq -r '.error.code' <<<"$response_json")
-      error_msg=$(jq -r '.error.message' <<<"$response_json")
-      echo -e "\n${red}- API ERROR -${default}" >&2
-      echo -e "${redbg} TYPE ${default} $error_type" >&2
-      echo -e "${redbg} CODE ${default} $error_code" >&2
-      echo -e "${redbg} MESG ${default} $error_msg" >&2
-      retryafter="$RETRY_WAIT_TIME"
-      while [[ ${retryafter} -gt 0 ]]; do
-        StatusbarMessage "AI error. Retrying in ${redbg}${retryafter}${lightgreybg} seconds"
-        sleep 1
-        (( retryafter-- ))
-      done
-    else
-      createdate=$(jq -r '.created' <<<"$response_json")
-      break
-    fi
-  done
-  StatusbarMessage
-  term_cols=$(tput cols)
-  tmpfile=$(mktemp)
-  imgcounter=1
-  arr_imgfiles=()
-  arr_imgurls=()
-  for imageurl in $ai_output; do
-    StatusbarMessage "Parsing image n.$imgcounter"
-    imgfile="${tmpfile}_${imgcounter}"
-    arr_imgfiles+=("$imgfile")
-    curl -s "$imageurl" > "$imgfile"
-    shortened_imgurl="$(curl -s "http://tinyurl.com/api-create.php?url=$imageurl")"
-    arr_imgurls+=("$shortened_imgurl")
-    StatusbarMessage
-    (( imgcounter++ ))
-  done
-  i=1
-  ( for imgfile in "${arr_imgfiles[@]}"; do
-      convert "$imgfile" -font DejaVu-Sans -pointsize 250 -fill magenta -gravity south -annotate +0+5 "$i" miff:-
-      (( i++ ))
-    done ) | montage - -background '#000000' -geometry +0+0 "$tmpfile.png"
+#!#############################
+#! Model Management functions #
+#!#############################
 
-  echo -e "\n${default}\"${bold}${underline}${userinput}${default}\"\n"
-  catimg -w "$term_cols" "$tmpfile.png"
-  i=1
-  for imgurl in "${arr_imgurls[@]}"; do
-    echo -e "${blue}[$i]${default} - $imgurl"
-    (( i++ ))
-  done
-
-  savedir=$(date +"%Y_%m_%d-%H_%M_%S" -d @"$createdate")
-  savedir="${WORKING_DIR}/${savedir}_imgs"
-  echo ""
-  read -erp "${bold}Do you want to save the image(s) and prompt locally to ${blue}${savedir}${default} ? [Y/n]" wannasave
-  if [ -z "$wannasave" ] || [ "$wannasave" = "Y" ] || [ "$wannasave" = "y" ]; then
-    # save the images locally
-    mkdir -p "$savedir"
-    i=1
-    for imgfile in "${arr_imgfiles[@]}"; do
-      # move the individual image files to the savedir, renamed as 1.png, 2.png and so on
-      mv "$imgfile" "$savedir/$i.png"
-      (( i++ ))
-    done
-    # save the grid summary
-    mv "$tmpfile.png" "$savedir/preview_grid.png"
-    # and the prompt
-    echo "$userinput" > "$savedir/prompt.txt"
-  else
-    echo -e "\nNote: the image links will be valid for ${blue}2 hours${default}, after which the provider will delete them!\n"
-  fi
-  # delete any leftover temporary files
-  rm "${tmpfile}"*
-}
-
-MarkdownEcho() {
-  # parse markdown with glow if installed
-  if command -v glow &>/dev/null; then
-    echo -e "$@" | glow
-  else
-    # glow is not installed, just trim leading and trailing newlines from the response
-    output=$(sed -e :a -e '/./,$!d;/^\n*$/{$d;N;};/\n$/ba' <<<"$@")
-    echo -e "$output"
-  fi
-}
-
-UpdateConversationTopic() {
-  # $1 = full conversation history
-  temp_conversation_history=$(jq -c ". += [{\"role\": \"user\", \"content\": \"give me a 4-5 words title for this conversation. Don't list possible titles, come up with ONLY ONE and give it back. No other output must be given, beside the title itself.\"}]" <<<"$conversation_history")
-  CONVERSATION_TOPIC=$(SendChat "$temp_conversation_history" | jq -r '.content' | tr -d '\n')
-  # sometimes the AI replies with conversation names enclosed in double quotes, other times it has double quotes inside the topic description. Handle it
-  if [ "${CONVERSATION_TOPIC::1}" = '"' ] && [ "${CONVERSATION_TOPIC: -1}" = '"' ]; then
-    CONVERSATION_TOPIC=$(sed -e 's/^"//g' -e 's/"$//g' <<<"$CONVERSATION_TOPIC")
-  fi
-  CONVERSATION_TOPIC=$(echo -n "$CONVERSATION_TOPIC" | jq -Rs '.')
-}
-
-SaveConversation() {
-  [[ "$SAVE_CONVERSATION" = false ]] && return
-  current_conversation_size=$(jq -r '. | length' <<<"$conversation_history")
-  if [ "$current_conversation_size" -lt "$SAVE_CONVERSATION_MIN_SIZE" ]; then
-    return
-  fi
-  if [ -w "$CONVERSATIONS_FILENAME" ]; then
-    # conversations file is writeable
-    # Snapshot current system prompt (store name and content for reproducibility)
-    system_content=""
-    if [ -n "$CURRENT_SYSTEMPROMPT" ] && [ -f "$SYSTEMPROMPTS_FILENAME" ]; then
-      system_content=$(jq -r --arg name "$CURRENT_SYSTEMPROMPT" '.systemprompts[] | select(.name == $name) | .content' "$SYSTEMPROMPTS_FILENAME")
-    fi
-    json_conversation=$(jq \
-      --arg model "$CURRENT_MODEL" \
-      --arg sp_name "$CURRENT_SYSTEMPROMPT" \
-      --arg sp_content "$system_content" \
-      '{"model": $model, "conversation_name": '"$CONVERSATION_TOPIC"', "conversation": ., "system_prompt": (if $sp_name == "" then null else {name:$sp_name, content:$sp_content} end)}' \
-      <<<"$conversation_history")
-    jq --argjson conversation "$json_conversation" '. += [$conversation]' "${CONVERSATIONS_FILENAME}" > "${TMP_CONVERSATIONS_FILENAME}" && \
-      mv "${TMP_CONVERSATIONS_FILENAME}" "${CONVERSATIONS_FILENAME}"
-  fi
-}
-
-ReplayConversationMessages() {
-  # displays the messages in the $conversation_history buffer
-  # $1 = model name for this conversation
-  conversation_model="$1"
-  for row in $(jq -rc '.[]' <<<"$conversation_history"); do
-    speaker=$(jq -r '.role' <<<"$row")
-    rowcontent=$(jq -r '.content' <<<"$row")
-    case "${speaker}" in
-    "user")
-      speaker="YOU"
-      color="$green"
-      colorbg="$greenbg"
-      ;;
-    "assistant")
-      speaker="$conversation_model"
-      color="$white"
-      colorbg="$lightgreybg"
-      ;;
-    esac
-    ChatBubble "$speaker" "$colorbg" "$color" "null" "$speaker"
-    if [ "$speaker" = "$conversation_model" ]; then
-      # preserve markdown formatting in LLM replies
-      MarkdownEcho "$rowcontent"
-    else
-      for line in $(echo -e "$rowcontent"); do
-        echo -e "» $line"
-      done
-    fi
-  done
-}
-
-Ctrl_C() {
-  SaveConversation
-  StatusbarMessage
-  if [ "$IMAGE_GENERATION_MODE" = true ] && [ -n "$tmpfile" ]; then
-    # clean up temp files
-    rm "${tmpfile}"*
-  fi
-  tput sgr0
-  tput cnorm
-  exit 0
-}
-
-ParseConversationsFile() {
-  # check if conversation storing is enabled
-  if [ "$SAVE_CONVERSATION" = true ]; then
-    # load conversations file
-    if [ ! -f "$CONVERSATIONS_FILENAME" ]; then
-      if [ "$CONTINUE_CONVERSATION" = true ]; then
-        echo "Error: conversations file does not exist, cannot continue last conversation"
-        exit 1
-      elif [ "$DELETE_CONVERSATION" = true ]; then
-        echo "Error: conversations file does not exist, cannot delete conversation"
-        exit 1
-      fi
-      # conversations file does not exist, initialize it
-      echo "[]" > "$CONVERSATIONS_FILENAME"
-      num_previous_conversations=0
-    else
-      num_previous_conversations=$(jq '. | length' "${CONVERSATIONS_FILENAME}" 2>/dev/null)
-      if [ -z "$num_previous_conversations" ]; then
-        if [ "$CONTINUE_CONVERSATION" = true ]; then
-          echo "Error: conversations file is corrupted, cannot continue last conversation"
-          exit 1
-        elif [ "$DELETE_CONVERSATION" = true ]; then
-          echo "Error: conversations file is corrupted, cannot delete conversation"
-          exit 1
-        fi
-        # conversations file is invalid, reinitialize it
-        echo "[]" > "$CONVERSATIONS_FILENAME"
-        num_previous_conversations=0
-      fi
-    fi
-  fi
-}
-
-SwitchConversation() {
-  #
-  # @param $1 => conversation id (JSON array index) to switch to
-  #
-  # extract the requested conversation JSON
-  conversation_json=$(jq '.['"$1"']' "$CONVERSATIONS_FILENAME")
-  # load the new conversation into the current session
-  conversation_history=$(jq '.conversation' <<<"$conversation_json")
-  # update the conversation messages number
-  conversation_messages=$(jq 'length' <<<"$conversation_history")
-  # and switch the topic and model
-  CONVERSATION_TOPIC=$(jq '.conversation_name' <<<"$conversation_json")
-  conversation_model=$(jq -r '.model' <<<"$conversation_json")
-  # Restore system prompt selection, if present
-  CURRENT_SYSTEMPROMPT=$(jq -r '.system_prompt.name // ""' <<<"$conversation_json")
-  # show the old conversation to the user
-  ReplayConversationMessages "$conversation_model"
-  if ! SetCurrentModel "$conversation_model"; then
-    # the model for this conversation is not found in the configuration file, try to switch to the default model
-    if ! SetCurrentModel; then
-      # the default model is not found in the configuration file, cannot continue
-      exit 1
-    fi
-  fi
-  # delete the old conversation from the conversations file.
-  # an updated version of this conversation will be saved at the end of this session
-  jq 'del (.['"$1"'])' "${CONVERSATIONS_FILENAME}" > "${TMP_CONVERSATIONS_FILENAME}" && \
-    mv "${TMP_CONVERSATIONS_FILENAME}" "${CONVERSATIONS_FILENAME}"
-}
-
-ShowConversationsMenu() {
-  if [ "$SAVE_CONVERSATION" = true ]; then
-    ParseConversationsFile
-    echo -e "\n\n${yellowbg} Current conversation ${default}${yellow}"
-    printf "\n     %-50s %-30s" "$CONVERSATION_TOPIC" "${blue}${dim}[$CURRENT_MODEL]${default}${yellow}"
-    echo -en "\n\n${yellowbg} Previous conversations ${default}${yellow}"
-    if [ "$num_previous_conversations" = "0" ]; then
-      echo -en "\n  ${yellow}No previous/other conversations found!"
-    else
-      i=1
-      while IFS=$'\t' read -r title model prompt; do
-        if [ -n "$prompt" ]; then
-          prompt_str=" ${magenta}${dim}[SYS: $prompt]${default}${yellow}"
-        else
-          prompt_str=""
-        fi
-        printf "\n%3d) %-50s %-30s%s" "$i" "$title" "${blue}${dim}[$model]${default}${yellow}" "$prompt_str"
-        (( i++ ))
-      done < <(jq -r '.[] | [.conversation_name, .model, (.system_prompt.name // "")] | @tsv' "$CONVERSATIONS_FILENAME")
-    fi
-    echo -e "\n\n  ${bold}0) START A NEW CONVERSATION${default}${yellow}"
-    echo -e "\n\n${dim}Choose a conversation to continue, or\n${default}${yellow}[   0   ]${default}${yellow}${dim} to start a new conversation\n${default}${yellow}[ ENTER ]${default}${yellow}${dim} to return to the current one\n"
-    while true; do
-      read -erp "${default}${yellow}» " convmenuinput
-      if [ -n "$convmenuinput" ]; then
-        if [[ $convmenuinput =~ ^[0-9]+$ ]]; then
-          # user entered a valid integer
-          if [ "$convmenuinput" -gt "$num_previous_conversations" ] || [ "$convmenuinput" -lt 0 ]; then
-            echo "Please enter a number between 0 and $num_previous_conversations"
-            continue
-          else
-            (( convmenuinput-- )) # convmenuinput now points to the appropriate conversations JSON array index
-            break
-          fi
-        else
-          echo "Please enter a number between 0 and $num_previous_conversations"
-        fi
-      else
-        # user pressed enter, abort
-        echo
-        break
-      fi
-    done
-    if [ -n "$convmenuinput" ]; then
-      # user chose to continue a conversation or start a new one, first of all save the current one to disk
-      SaveConversation
-      if [ "$convmenuinput" = "-1" ]; then
-        # the user entered '0' to start a new conversation
-        CONVERSATION_TOPIC="\"new conversation\""
-        conversation_history="[]"
-        conversation_messages=0
-        echo -e "\n${greenbg} NEW CONVERSATION STARTED ${default}\n"
-        return
-      else
-        # the users wants to continue a previous conversation
-        SwitchConversation "$convmenuinput"
-      fi
-    fi
-  else
-    echo -e "\n\n${redbg} ERROR ${default}${red} conversation saving is not enabled!\n"
-  fi
-}
 
 # Function to set a model as default in the configuration file
 SetDefaultModel(){
@@ -972,7 +982,9 @@ ManageModels() {
           ;;
         "q"|"Q")  # Quit
           tput cnorm # show cursor
-          exit 0
+          # exit 0
+          echo "current model: $CURRENT_MODEL"
+          return 0
           ;;
       esac
     done
@@ -1148,6 +1160,33 @@ AddNewModel() {
   fi
 }
 
+SetCurrentModel() {
+  if [ -n "$1" ]; then
+    # Model specified via command line
+    if jq -e --arg model "$1" '.models[$model] == null' "$CONFIG_FILENAME" &>/dev/null; then
+      echo -e "${yellowbg} WARNING ${default}${yellow}${dim} Model ${default}${yellow}\"$1\"${dim} not found in configuration.${default}"
+      return 1
+    fi
+    CURRENT_MODEL="$1"
+  else
+    # Determine default model
+    default_model=$(jq -r '.models | to_entries[] | select(.value.default == true) | .key' "$CONFIG_FILENAME")
+    if [ -z "$default_model" ]; then
+      echo -e "${redbg} ERROR ${default}${red} No default model set in configuration.${default}"
+      return 1
+    fi
+    CURRENT_MODEL="$default_model"
+  fi
+  echo -e "\n${blue}${dim}[Model set to ${default}${blue}${CURRENT_MODEL}${dim}]${default}"
+}
+
+#!######################################################################################################################################################
+
+#!########################################
+#! Config mgmt and misc helper functions #
+#!########################################
+
+
 InitializeConfig() {
   empty_config_template='{"models": {}, "api_keys": {}, "default_system_prompt": null}'
   # Create config directory if it doesn't exist
@@ -1176,26 +1215,6 @@ InitializeConfig() {
   fi
 }
 
-SetCurrentModel() {
-  if [ -n "$1" ]; then
-    # Model specified via command line
-    if jq -e --arg model "$1" '.models[$model] == null' "$CONFIG_FILENAME" &>/dev/null; then
-      echo -e "${yellowbg} WARNING ${default}${yellow}${dim} Model ${default}${yellow}\"$1\"${dim} not found in configuration.${default}"
-      return 1
-    fi
-    CURRENT_MODEL="$1"
-  else
-    # Determine default model
-    default_model=$(jq -r '.models | to_entries[] | select(.value.default == true) | .key' "$CONFIG_FILENAME")
-    if [ -z "$default_model" ]; then
-      echo -e "${redbg} ERROR ${default}${red} No default model set in configuration.${default}"
-      return 1
-    fi
-    CURRENT_MODEL="$default_model"
-  fi
-  echo -e "\n${blue}${dim}[Model set to ${default}${blue}${CURRENT_MODEL}${dim}]${default}"
-}
-
 CoreutilsFixup() {
 	# check for GNU coreutils alternatives (improve command predictability on FreeBSD/MacOS systems)
 	if [ -x "$(command -v gsed)" ]; then
@@ -1210,6 +1229,18 @@ CoreutilsFixup() {
 		numfmt() { gnumfmt "$@"; }
 		export -f numfmt
 	fi
+}
+
+Ctrl_C() {
+  SaveConversation
+  StatusbarMessage
+  if [ "$IMAGE_GENERATION_MODE" = true ] && [ -n "$tmpfile" ]; then
+    # clean up temp files
+    rm "${tmpfile}"*
+  fi
+  tput sgr0
+  tput cnorm
+  exit 0
 }
 
 GetFullParamsFromCurrentPosition() {
@@ -1233,6 +1264,8 @@ GetFullParamsFromCurrentPosition() {
     userinput+=" $option"
   done
 }
+
+#!######################################################################################################################################################
 
 #*
 #* Main script start
@@ -1568,7 +1601,9 @@ while true; do
     ShowConversationsMenu
     ShowCommandsRecap
   elif [ "$SHOW_MODELMENU" = true ]; then
+    SAVE_CURRENT_MODEL="$CURRENT_MODEL"
     ManageModels
+    [[ -z "$CURRENT_MODEL" ]] && SetCurrentModel "$SAVE_CURRENT_MODEL"
     ShowCommandsRecap
   elif [ "$SHOW_SYSPROMPTMENU" = true ]; then
     ManageSystemPrompts
