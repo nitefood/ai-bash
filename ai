@@ -232,7 +232,9 @@ SystemPrompt_PreviewCmd() {
 # Prints two lines on stdout: <key>\n<selected_line>
 SystemPrompt_RunFzf() {
   local header
-  header="${dim}Enter${default}: select   ${dim}a${default}: add   ${dim}e${default}: edit   ${dim}d${default}: delete   ${dim}s${default}: set default   ${dim}q/ESC${default}: quit"
+  header="${dim}Enter${default} : select       ${dim}ctrl-a${default}: add"$'\n'
+  header+="${dim}ctrl-e${default}: edit         ${dim}ctrl-d${default}: delete"$'\n'
+  header+="${dim}ctrl-s${default}: set default  ${dim}ctrl-c${default}: quit"$'\n'
   export FZF_SYSPROMPTS_FILE="$SYSTEMPROMPTS_FILENAME"
   export -f SystemPrompt_PreviewCmd
   SystemPrompt_ListLines | \
@@ -242,8 +244,8 @@ SystemPrompt_RunFzf() {
       --prompt='System Prompts > ' \
       --header="$header" \
       --preview 'SystemPrompt_PreviewCmd "{}"' \
-      --preview-window 'right,60%,border-left,wrap' \
-      --expect=enter,a,e,d,s,q
+      --preview-window 'right,79%,border-left,wrap' \
+      --expect=enter,ctrl-a,ctrl-e,ctrl-d,ctrl-s
 }
 
 # List, create, edit, delete, and select system prompts
@@ -271,7 +273,7 @@ ManageSystemPrompts() {
         SYSPROMPT_OVERRIDE=true
         break
         ;;
-      a)
+      ctrl-a)
         read -erp "Enter prompt name (max 20 chars, unique): " newname
         if [ -z "$newname" ] || [ ${#newname} -gt 20 ]; then
           echo "Name must be 1-20 characters."
@@ -293,7 +295,7 @@ ManageSystemPrompts() {
         echo -e "${greenbg} SUCCESS ${default} System prompt ${green}$newname${default} added successfully."
         sleep 1
         ;;
-      e)
+      ctrl-e)
         if [ "$sel_name" = "__NONE__" ] || [ -z "$sel_name" ]; then
           echo "Select a prompt to edit."
           sleep 1
@@ -332,7 +334,7 @@ ManageSystemPrompts() {
         echo -e "${greenbg} SUCCESS ${default} $statusmsg"
         sleep 1
         ;;
-      d)
+      ctrl-d)
         if [ "$sel_name" = "__NONE__" ] || [ -z "$sel_name" ]; then
           echo "Select a prompt to delete."
           sleep 1
@@ -352,7 +354,7 @@ ManageSystemPrompts() {
           sleep 1
         fi
         ;;
-      s)
+      ctrl-s)
         if [ -z "$sel_name" ]; then
           continue
         fi
@@ -364,9 +366,6 @@ ManageSystemPrompts() {
           echo -e "${greenbg} SUCCESS ${default} Default system prompt set to ${green}$sel_name${default}."
         fi
         sleep 1
-        ;;
-      q)
-        break
         ;;
       *)
         # No key (e.g., fzf closed), just break
@@ -864,108 +863,6 @@ DrawModelMenu() {
 
   echo -e "\n${dim}Use the arrow keys to navigate.\n\nPress ENTER to select a model"
   echo -e "${default}a${dim}: add  ${default}d${dim}: delete  ${default}s${dim}: set as default  ${default}q${dim}: quit"
-}
-
-# Function to draw the system prompt selection menu with arrow
-DrawSystemPromptMenu() {
-  # $1 = total number of items (system prompts + [none])
-  # $2 = fullredraw (true -> reload prompts and redraw menu | false -> just move the cursor) [DEFAULT: true]
-  local items_count=$1
-  local fullredraw=$2
-  local i=1
-
-  # Decide layout early so we can choose between fast cursor move or full redraw
-  local SHOW_COMPACT_MENU=false
-  termwidth=$(tput cols)
-  if [ "$termwidth" -le 88 ]; then
-    SHOW_COMPACT_MENU=true
-  fi
-
-  if [ "$fullredraw" = false ] && [ "$SHOW_COMPACT_MENU" = true ]; then
-    # Only move the arrow cursor in compact mode (one line per item)
-    tput sc
-    for ((i=1; i<=items_count; i++)); do
-      [[ $i -eq "$CURSOR_POS" ]] && arrow=" ${blue}→${default}" || arrow="  "
-      tput cup $(( i+4 )) 0
-      echo -n "$arrow"
-    done
-    tput rc
-    return
-  fi
-
-  # Full redraw
-  tput civis
-  tput clear
-  echo -e "\n${lightgreybg}System Prompts:${default}\n"
-
-  if [ "$SHOW_COMPACT_MENU" = false ]; then
-    printf "   %-40s %-10s %s\n" "Name" "Is Default?" "Preview"
-    printf "   %-40s %-10s %s\n" "----" "-----------" "-------"
-  else
-    printf "   %-40s %-1s\n" "Name" "Is Default?"
-    printf "   %-40s %-1s\n" "----" "-----------"
-  fi
-
-  local default_sp
-  default_sp=$(jq -r '.default_system_prompt // ""' "$CONFIG_FILENAME" 2>/dev/null)
-
-  # Render [none] first
-  if [ -z "$default_sp" ]; then
-    default_color="${green}"; checkmark="${green}✓${default}"
-  else
-    default_color="${white}"; checkmark=""
-  fi
-  [[ $CURSOR_POS -eq 1 ]] && arrow="${blue}→${default}" || arrow=" "
-  if [ "$SHOW_COMPACT_MENU" = false ]; then
-    printf " ${arrow} ${default_color}%-40s${default} %-10s\n" "[none]" "${checkmark}"
-  else
-    printf " ${arrow} ${default_color}%-40s${default} ${green}%8s${default}\n" "[none]" "$checkmark"
-  fi
-
-  # Render actual prompts
-  local prompts_json
-  prompts_json=$(jq -r '.systemprompts' "$SYSTEMPROMPTS_FILENAME")
-  i=2
-  local name name_color default_check
-  while IFS= read -r name; do
-    if [ "$name" = "$default_sp" ]; then
-      name_color="${green}"; default_check="${green}✓${default}"
-    else
-      name_color="${white}"; default_check=""
-    fi
-    [[ $CURSOR_POS -eq $i ]] && arrow="${blue}→${default}" || arrow=" "
-
-    if [ "$SHOW_COMPACT_MENU" = false ]; then
-      # Compute preview width and indent
-      local preview wrap_width firstline truncated line_count indent_spaces content
-      # Get content for this prompt
-      content=$(jq -r --arg n "$name" '.[] | select(.name == $n) | .content' <<<"$prompts_json")
-      # Available width: assume arrow+space + name(40) + space + default(10) = 53 visible chars
-      wrap_width=$(( termwidth - 53 ))
-      [ "$wrap_width" -lt 10 ] && wrap_width=10
-      preview=$(echo -e "$content" | fold -s -w $wrap_width)
-      line_count=$(echo -e "$preview" | wc -l)
-      truncated=$(echo -e "$preview" | head -n 10)
-      firstline=$(echo -e "$truncated" | sed -n '1p')
-      # First row with columns and first preview line
-      printf " ${arrow} ${name_color}%-40s${default} %-10s ${dim}%s${default}\n" "$name" "${default_check}" "$firstline"
-      # Subsequent preview lines
-      indent_spaces=$(printf '%*s' 53 '')
-      echo -e "$truncated" | sed '1d' | while IFS= read -r line; do
-        printf "%s ${dim}%s${default}\n" "$indent_spaces" "$line"
-      done
-      if [ "$line_count" -gt 10 ]; then
-        printf "%s ${dim}[...]${default}\n" "$indent_spaces"
-      fi
-    else
-      printf " ${arrow} ${name_color}%-40s${default} ${green}%8s${default}\n" "$name" "$default_check"
-    fi
-
-    ((i++))
-  done < <(jq -r '.[].name' <<<"$prompts_json")
-
-  echo -e "\n${dim}Use the arrow keys to navigate.\n\nPress ENTER to select a system prompt"
-  echo -e "${default}a${dim}: add  ${default}e${dim}: edit  ${default}d${dim}: delete  ${default}s${dim}: set as default  ${default}q${dim}: quit"
 }
 
 # Main model management function
