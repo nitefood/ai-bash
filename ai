@@ -1247,7 +1247,7 @@ AddNewModel() {
 }
 
 InitializeConfig() {
-  empty_config_template='{"models": {}, "api_keys": {}}'
+  empty_config_template='{"models": {}, "api_keys": {}, "default_system_prompt": null}'
   # Create config directory if it doesn't exist
   mkdir -p "$WORKING_DIR"
   # Check if config file exists
