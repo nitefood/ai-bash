@@ -241,8 +241,11 @@ SystemPrompt_RunFzf() {
   fzf --ansi \
       --with-nth=3 \
       --delimiter='\t' \
+      --color=fg:yellow,preview-fg:white,bg:black,hl:blue,prompt:yellow,header:cyan,info:green,pointer:white,marker:red,spinner:blue,query:white \
       --prompt='System Prompts > ' \
+      --pointer='→' \
       --header="$header" \
+      --border=rounded \
       --preview 'SystemPrompt_PreviewCmd "{}"' \
       --preview-window 'right,79%,border-left,wrap' \
       --expect=enter,ctrl-a,ctrl-e,ctrl-d,ctrl-s
@@ -274,6 +277,7 @@ ManageSystemPrompts() {
         break
         ;;
       ctrl-a)
+        echo
         read -erp "Enter prompt name (max 20 chars, unique): " newname
         if [ -z "$newname" ] || [ ${#newname} -gt 20 ]; then
           echo "Name must be 1-20 characters."
@@ -285,6 +289,7 @@ ManageSystemPrompts() {
           sleep 1
           continue
         fi
+        echo
         newcontent="$(MultiLineInput 'Enter prompt content (press Ctrl-D when done):')"
         if [ -z "$newcontent" ]; then
           echo "Content cannot be empty."
@@ -360,10 +365,10 @@ ManageSystemPrompts() {
         fi
         if [ "$sel_name" = "__NONE__" ]; then
           jq '.default_system_prompt = null' "$CONFIG_FILENAME" > temp.json && mv temp.json "$CONFIG_FILENAME"
-          echo -e "${greenbg} SUCCESS ${default} Default system prompt set to ${green}[none]${default}."
+          echo -e "\n${greenbg} SUCCESS ${default} Default system prompt set to ${green}[none]${default}."
         else
           jq --arg name "$sel_name" '.default_system_prompt = $name' "$CONFIG_FILENAME" > temp.json && mv temp.json "$CONFIG_FILENAME"
-          echo -e "${greenbg} SUCCESS ${default} Default system prompt set to ${green}$sel_name${default}."
+          echo -e "\n${greenbg} SUCCESS ${default} Default system prompt set to ${green}$sel_name${default}."
         fi
         sleep 1
         ;;
