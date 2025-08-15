@@ -59,6 +59,10 @@
 
   `ai -s`
 
+###### Disable markdown rendering:
+
+  `ai -n`
+
 ###### Start a new interactive conversation [optionally overriding the default model/system prompt]:
 
 `ai [-m <model_name>|-s <sysprompt_name>]`

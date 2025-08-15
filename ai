@@ -14,7 +14,7 @@
 # ╰──────────────────────────────────────────────────────────────────────────────────────╯
 
 # TODO: temperature setting and presets
-AI_VERSION="1.0.0-beta+8"
+AI_VERSION="1.0.0-beta+9"
 
 # Color scheme
 green=$'\e[38;5;035m'
@@ -55,6 +55,7 @@ CURRENT_SYSTEMPROMPT=""
 CURRENT_MODEL=""
 CURSOR_POS=1
 SYSPROMPT_OVERRIDE=false
+DISABLE_MARKDOWN=false
 
 StatusbarMessage() { # invoke without parameters to delete the status bar message
   if [ -n "$statusbar_message" ]; then
@@ -208,10 +209,11 @@ SendChat() {
 
 MarkdownEcho() {
   # parse markdown with glow if installed
-  if command -v glow &>/dev/null; then
+  if command -v glow &>/dev/null && [ "$DISABLE_MARKDOWN" = false ]; then
     echo -e "$@" | glow
   else
-    # glow is not installed, just trim leading and trailing newlines from the response
+    # glow is not installed or the user passed the -n flag to disable markdown
+    # just trim leading and trailing newlines from the response
     output=$(sed -e :a -e '/./,$!d;/^\n*$/{$d;N;};/\n$/ba' <<<"$@")
     echo -e "$output"
   fi
@@ -1347,7 +1349,7 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
     # in this mode, getopts sets optchar to:
     # '?' -> unknown option
     # ':' -> missing mandatory parameter to the option
-    optspec=":hcd:li"
+    optspec=":hcd:lin"
     while getopts "$optspec" optchar; do {
       case "${optchar}" in
       "h")
@@ -1356,6 +1358,7 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
         echo -e "${dim}Show this help:${default}\n  ${blue}ai -h${default}"
         echo -e "${dim}Manage models (add/delete/set default):${default}\n  ${blue}ai -m${default}"
         echo -e "${dim}Manage system prompts:${default}\n  ${blue}ai -s${default}"
+        echo -e "${dim}Disable markdown rendering:${default}\n  ${blue}ai -n${default}"
         echo -e "${dim}Start a new interactive conversation [optionally overriding the default model/system prompt]:${default}\n  ${blue}ai [-m <model_name>|-s <sysprompt_name>]${default}"
         echo -e "${dim}Single turn Q&A:${default}\n  ${blue}ai [-m <model_name>|-s <sysprompt_name>] \"how many planets are there in the solar system?\"${default}"
         echo -e "${dim}Generate one or more images (default: 1):${default}\n  ${blue}ai -i [num] \"a cute cat\"${default}"
@@ -1456,6 +1459,11 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
         ;;
       "m")
         # (handled in pre-processing)
+        ;;
+      "n")
+        # Disable markdown rendering
+        DISABLE_MARKDOWN=true
+        echo -e "\n${blue}${dim}[Markdown rendering ${red}disabled${blue}]${default}"
         ;;
       *)
         if [ "$OPTERR" = 1 ] && [ -t 0 ]; then
