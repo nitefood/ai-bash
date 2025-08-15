@@ -14,7 +14,7 @@
 # ╰──────────────────────────────────────────────────────────────────────────────────────╯
 
 # TODO: temperature setting and presets
-AI_VERSION="1.0.0-beta+7"
+AI_VERSION="1.0.0-beta+8"
 
 # Color scheme
 green=$'\e[38;5;035m'
@@ -889,120 +889,111 @@ DrawModelMenu() {
 
 # Main model management function
 ManageModels() {
-  if [ -z "$1" ]; then
-    # if the user invoked "ai -m" without any parameters, pop up the model selection menu
+  # Pop up the model selection menu
+  
+  # Create a trap to handle window resizing
+  trap 'tput clear; DrawModelMenu "$model_count" true' WINCH
 
-    # Create a trap to handle window resizing
-    trap 'tput clear; DrawModelMenu "$model_count" true' WINCH
+  # count models
+  model_count=$(jq -r '.models | keys | length' "$CONFIG_FILENAME")
 
-    # count models
+  while [ "$model_count" -eq 0 ]; do
+    tput clear
+    echo "${dim}No models found in the configuration file. Please add one below.${default}"
+    AddNewModel true
+    sleep 3s
     model_count=$(jq -r '.models | keys | length' "$CONFIG_FILENAME")
+  done
+  # Draw initial menu
+  DrawModelMenu "$model_count"
 
-    while [ "$model_count" -eq 0 ]; do
-      tput clear
-      echo "${dim}No models found in the configuration file. Please add one below.${default}"
-      AddNewModel true
-      sleep 3s
-      model_count=$(jq -r '.models | keys | length' "$CONFIG_FILENAME")
-    done
-    # Draw initial menu
-    DrawModelMenu "$model_count"
-
-    # Handle key input
-    while true; do
-      read -rsn1 key
-      case "$key" in
-        $'\x1B')  # ESC sequence
+  # Handle key input
+  while true; do
+    read -rsn1 key
+    case "$key" in
+      $'\x1B')  # ESC sequence
+        read -rsn1 -t 0.1 key
+        if [ "$key" = "[" ]; then
           read -rsn1 -t 0.1 key
-          if [ "$key" = "[" ]; then
-            read -rsn1 -t 0.1 key
-            case "$key" in
-              "A")  # Up arrow
-                ((CURSOR_POS--))
-                [ $CURSOR_POS -lt 1 ] && CURSOR_POS="$model_count"
-                DrawModelMenu "$model_count" false
-                ;;
-              "B")  # Down arrow
-                ((CURSOR_POS++))
-                [ "$CURSOR_POS" -gt "$model_count" ] && CURSOR_POS=1
-                DrawModelMenu "$model_count" false
-                ;;
-            esac
+          case "$key" in
+            "A")  # Up arrow
+              ((CURSOR_POS--))
+              [ $CURSOR_POS -lt 1 ] && CURSOR_POS="$model_count"
+              DrawModelMenu "$model_count" false
+              ;;
+            "B")  # Down arrow
+              ((CURSOR_POS++))
+              [ "$CURSOR_POS" -gt "$model_count" ] && CURSOR_POS=1
+              DrawModelMenu "$model_count" false
+              ;;
+          esac
+        fi
+        ;;
+      "")  # Enter key, Select model
+        tput cnorm # show cursor
+        model_name=$(jq -r ".models | keys[$((CURSOR_POS-1))]" "$CONFIG_FILENAME")
+        SetCurrentModel "$model_name"
+        break
+        ;;
+      "a"|"A")  # Add model
+        tput cnorm # show cursor
+        AddNewModel false
+        sleep 3s
+        model_count=$(jq -r '.models | keys | length' "$CONFIG_FILENAME")
+        CURSOR_POS=1
+        DrawModelMenu "$model_count"
+        ;;
+      "d"|"D")  # Delete model
+        tput cnorm # show cursor
+        model_name=$(jq -r ".models | keys[$((CURSOR_POS-1))]" "$CONFIG_FILENAME")
+        if ! jq -e --arg model_name "$model_name" '.models[$model_name]' "$CONFIG_FILENAME" >/dev/null; then
+          echo -e "\n${redbg} ERROR ${default} Model ${red}$model_name${default} not found.\n"
+          return 1
+        fi
+        # Prompt the user for confirmation
+        echo -en "\n${yellowbg} WARNING ${default} Are you sure you want to delete model ${yellow}$model_name${default}? [y/N]: "
+        read -r confirm_delete
+        if [[ "$confirm_delete" =~ ^[Yy]$ ]]; then
+          is_default=$(jq -r --arg model_name "$model_name" '.models[$model_name].default' "$CONFIG_FILENAME")
+          jq --arg model_name "$model_name" 'del(.models[$model_name])' "$CONFIG_FILENAME" >temp.json && mv temp.json "$CONFIG_FILENAME"
+          if [ "$is_default" = "true" ]; then
+            first_model=$(jq -r '.models | keys[0]' "$CONFIG_FILENAME")
+            if [ "$first_model" = "null" ]; then
+              echo -e "${yellowbg} WARNING ${default} Default model deleted"
+            else
+              jq --arg first_model "$first_model" '.models[$first_model].default = true' "$CONFIG_FILENAME" >temp.json && mv temp.json "$CONFIG_FILENAME"
+              echo -e "${yellowbg} WARNING ${default} Default model deleted. ${yellow}$first_model${default} set as new default."
+            fi
           fi
-          ;;
-        "")  # Enter key, Select model
-          tput cnorm # show cursor
-          model_name=$(jq -r ".models | keys[$((CURSOR_POS-1))]" "$CONFIG_FILENAME")
-          SetCurrentModel "$model_name"
-          break
-          ;;
-        "a"|"A")  # Add model
-          tput cnorm # show cursor
-          AddNewModel false
+          echo -e "${greenbg} SUCCESS ${default} Model ${green}$model_name${default} deleted successfully."
+          (( model_count-- ))
+          CURSOR_POS=1
+          sleep 3s
+        fi
+        while [ "$model_count" -eq 0 ]; do
+          tput clear
+          echo "${dim}No models found in the configuration file. Please add one below.${default}"
+          AddNewModel true
           sleep 3s
           model_count=$(jq -r '.models | keys | length' "$CONFIG_FILENAME")
-          CURSOR_POS=1
-          DrawModelMenu "$model_count"
-          ;;
-        "d"|"D")  # Delete model
-          tput cnorm # show cursor
-          model_name=$(jq -r ".models | keys[$((CURSOR_POS-1))]" "$CONFIG_FILENAME")
-          if ! jq -e --arg model_name "$model_name" '.models[$model_name]' "$CONFIG_FILENAME" >/dev/null; then
-            echo -e "\n${redbg} ERROR ${default} Model ${red}$model_name${default} not found.\n"
-            return 1
-          fi
-          # Prompt the user for confirmation
-          echo -en "\n${yellowbg} WARNING ${default} Are you sure you want to delete model ${yellow}$model_name${default}? [y/N]: "
-          read -r confirm_delete
-          if [[ "$confirm_delete" =~ ^[Yy]$ ]]; then
-            is_default=$(jq -r --arg model_name "$model_name" '.models[$model_name].default' "$CONFIG_FILENAME")
-            jq --arg model_name "$model_name" 'del(.models[$model_name])' "$CONFIG_FILENAME" >temp.json && mv temp.json "$CONFIG_FILENAME"
-            if [ "$is_default" = "true" ]; then
-              first_model=$(jq -r '.models | keys[0]' "$CONFIG_FILENAME")
-              if [ "$first_model" = "null" ]; then
-                echo -e "${yellowbg} WARNING ${default} Default model deleted"
-              else
-                jq --arg first_model "$first_model" '.models[$first_model].default = true' "$CONFIG_FILENAME" >temp.json && mv temp.json "$CONFIG_FILENAME"
-                echo -e "${yellowbg} WARNING ${default} Default model deleted. ${yellow}$first_model${default} set as new default."
-              fi
-            fi
-            echo -e "${greenbg} SUCCESS ${default} Model ${green}$model_name${default} deleted successfully."
-            (( model_count-- ))
-            CURSOR_POS=1
-            sleep 3s
-          fi
-          while [ "$model_count" -eq 0 ]; do
-            tput clear
-            echo "${dim}No models found in the configuration file. Please add one below.${default}"
-            AddNewModel true
-            sleep 3s
-            model_count=$(jq -r '.models | keys | length' "$CONFIG_FILENAME")
-          done
-          DrawModelMenu "$model_count"
-          ;;
-        "s"|"S")  # Set default model
-          model_name=$(jq -r ".models | keys[$((CURSOR_POS-1))]" "$CONFIG_FILENAME")
-          echo
-          SetDefaultModel "$model_name"
-          sleep 1s
-          DrawModelMenu "$model_count" true
-          ;;
-        "q"|"Q")  # Quit
-          tput cnorm # show cursor
-          # exit 0
-          echo "current model: $CURRENT_MODEL"
-          return 0
-          ;;
-      esac
-    done
-  else
-    # treat $1 as a model name and switch to it (e.g. "ai -m gpt4o"). Quit if model is not found
-    if ! SetCurrentModel "$1"; then
-      exit 1
-    fi
-    # shift the arguments and let the script handle the rest of the input (if any)
-    shift
-  fi
+        done
+        DrawModelMenu "$model_count"
+        ;;
+      "s"|"S")  # Set default model
+        model_name=$(jq -r ".models | keys[$((CURSOR_POS-1))]" "$CONFIG_FILENAME")
+        echo
+        SetDefaultModel "$model_name"
+        sleep 1s
+        DrawModelMenu "$model_count" true
+        ;;
+      "q"|"Q")  # Quit
+        tput cnorm # show cursor
+        # exit 0
+        echo "current model: $CURRENT_MODEL"
+        return 0
+        ;;
+    esac
+  done
 }
 
 AddNewModel() {
@@ -1296,6 +1287,58 @@ InitializeConfig
 if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
   # script was called with a command line parameter, or was invoked through a pipe
   if [ "$#" -ge 1 ]; then
+    # Pre-process -m and -s which accept an optional argument.
+    # Build a new args array without -m/-s and capture any provided values.
+    ARGS=("$@")
+    NEWARGS=()
+    PRE_OVERRIDE_MODEL=""
+    PRE_OVERRIDE_SYSPROMPT=""
+    i=0
+    while [ $i -lt ${#ARGS[@]} ]; do
+      token="${ARGS[$i]}"
+      case "$token" in
+        -m)
+          next_index=$((i+1))
+          nextval=""
+          if [ $next_index -lt ${#ARGS[@]} ]; then
+            nextval="${ARGS[$next_index]}"
+          fi
+          if [ -n "$nextval" ] && [[ "$nextval" != -* ]]; then
+            PRE_OVERRIDE_MODEL="$nextval"
+            i=$((i+2))
+            continue
+          else
+            PRE_OVERRIDE_MODEL="__MENU__"
+            i=$((i+1))
+            continue
+          fi
+          ;;
+        -s)
+          next_index=$((i+1))
+          nextval=""
+          if [ $next_index -lt ${#ARGS[@]} ]; then
+            nextval="${ARGS[$next_index]}"
+          fi
+          if [ -n "$nextval" ] && [[ "$nextval" != -* ]]; then
+            PRE_OVERRIDE_SYSPROMPT="$nextval"
+            i=$((i+2))
+            continue
+          else
+            PRE_OVERRIDE_SYSPROMPT="__MENU__"
+            i=$((i+1))
+            continue
+          fi
+          ;;
+        *)
+          NEWARGS+=("$token")
+          i=$((i+1))
+          ;;
+      esac
+    done
+
+    # Replace positional parameters with the filtered list (so getopts doesn't see -m/-s)
+    set -- "${NEWARGS[@]}"
+
     # parse command line options
     #
     # optspec contains:
@@ -1304,7 +1347,7 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
     # in this mode, getopts sets optchar to:
     # '?' -> unknown option
     # ':' -> missing mandatory parameter to the option
-    optspec=":hcd:lims"
+    optspec=":hcd:li"
     while getopts "$optspec" optchar; do {
       case "${optchar}" in
       "h")
@@ -1326,16 +1369,7 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
         exit 0
         ;;
       "s")
-        # user wants to manage/select system prompt for the current session
-        # Optional-arg pattern: if next token is not another option, take it as the name
-        next_arg="${!OPTIND}"
-        if [ -n "$next_arg" ] && [[ "$next_arg" != -* ]]; then
-          ManageSystemPromptOption "$next_arg" || exit 1
-          shift 2
-        else
-          ManageSystemPromptOption || exit 1
-          shift
-        fi
+        # (handled in pre-processing)
         ;;
       "c")
         # user wants to continue a conversation
@@ -1421,10 +1455,7 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
         break
         ;;
       "m")
-        # user wants to manage models or select a specific model for the current session
-        shift
-        ManageModels "$@"
-        shift
+        # (handled in pre-processing)
         ;;
       *)
         if [ "$OPTERR" = 1 ] && [ -t 0 ]; then
@@ -1436,6 +1467,24 @@ if [ "$#" -ge 1 ] || [ ! -t 0 ]; then
       esac
     }
     done
+    # Apply pre-processed -m and -s overrides (if any)
+    if [ -n "${PRE_OVERRIDE_MODEL}" ]; then
+      if [ "${PRE_OVERRIDE_MODEL}" = "__MENU__" ]; then
+        ManageModels
+      else
+        if ! SetCurrentModel "${PRE_OVERRIDE_MODEL}"; then
+          exit 1
+        fi
+      fi
+    fi
+    if [ -n "${PRE_OVERRIDE_SYSPROMPT}" ]; then
+      if [ "${PRE_OVERRIDE_SYSPROMPT}" = "__MENU__" ]; then
+        ManageSystemPrompts
+      else
+        SetCurrentSystemPrompt "${PRE_OVERRIDE_SYSPROMPT}" || exit 1
+      fi
+    fi
+
     userinput=$(awk '{ sub(/^[ \t]+/, ""); print }' <<<"$userinput")
   fi
 
